@@ -1,0 +1,139 @@
+{
+  "_说明": "把这份文件复制成 config.json 再改。所有 {dataRoot} 会被替换成 system.dataRoot 的真实路径。",
+
+  "system": {
+    "enabled": true,
+    "dataRoot": "./data",
+    "httpPort": 7331,
+    "injectTimeoutMs": 300,
+    "injectMaxChars": 1200
+  },
+
+  "memory": {
+    "enabled": true,
+    "embed": {
+      "mode": "onnx",
+      "model": "{dataRoot}/memory/vec/bge-m3.onnx",
+      "dims": 1024,
+      "httpUrl": ""
+    },
+    "write": {
+      "summarizeEveryMessages": 30,
+      "maxPerCall": 6
+    },
+    "maintain": {
+      "mergeCosine": 0.92,
+      "archiveAfterDays": 30,
+      "purgeArchivedAfterDays": 180,
+      "conflictDetect": true
+    },
+    "caps": {
+      "episode": 2000,
+      "fact": 3000,
+      "reflection": 500,
+      "skill": 300,
+      "lesson": 500
+    },
+    "weights": {
+      "sem": 0.18,
+      "kw": 0.46,
+      "graph": 0.11,
+      "importance": 0.14,
+      "freshness": 0.11
+    },
+    "halfLifeDays": {
+      "episode": 14,
+      "fact": 90,
+      "reflection": 30,
+      "skill": 180,
+      "lesson": 365
+    },
+    "recall": {
+      "minScore": 0.45,
+      "privateCount": 2,
+      "groupCount": 1,
+      "dedupSimilarity": 0.82
+    }
+  },
+
+  "emotion": {
+    "enabled": true,
+    "maxDeltaPerMessage": 0.12,
+    "labelCap": 0.6,
+    "labelHalfLifeMin": 45,
+    "moodHalfLifeHours": 6,
+    "comfortDelta": 0.08,
+    "inject": true
+  },
+
+  "life": {
+    "enabled": true,
+    "activities": ["学习", "看书", "刷视频", "写日记", "发呆", "群里冒泡"],
+    "exploreRate": 0.1,
+    "weightUp": 0.05,
+    "decayPerDay": 0.03,
+    "tmpNoteTtlHours": 24,
+    "moodBiasWhenLow": ["放松", "安慰"],
+    "diaryDir": "{dataRoot}/diary",
+    "share": {
+      "probability": 0.3,
+      "moodMin": 0.3,
+      "cooldownHours": 6,
+      "channel": ""
+    }
+  },
+
+  "expression": {
+    "enabled": true,
+    "style": {
+      "enabled": true,
+      "sampleSize": 300,
+      "injectChars": 130,
+      "refreshHours": 6
+    },
+    "cleanup": {
+      "enabled": true,
+      "antibot": true,
+      "dropTrailingPeriodOnShort": 6,
+      "mergeParagraphs": true,
+      "emojiPacing": true
+    }
+  },
+
+  "feedback": {
+    "enabled": true,
+    "corrections": {
+      "enabled": true,
+      "patterns": ["不是", "记错", "没这回事", "谁说的", "你搞错了"],
+      "penalty": 0.15
+    },
+    "dailyHealth": {
+      "enabled": true,
+      "at": "03:10"
+    },
+    "eval": {
+      "enabled": true,
+      "minQueries": 20
+    }
+  },
+
+  "persona": {
+    "enabled": true,
+    "targets": {
+      "persona": [],
+      "derived": [],
+      "infra": []
+    }
+  },
+
+  "self": {
+    "shareUrl": "",
+    "consoleTokenFile": ""
+  },
+
+  "audio": {
+    "enabled": false,
+    "model": "./models/faster-whisper-small",
+    "maxMinutes": 5
+  }
+}

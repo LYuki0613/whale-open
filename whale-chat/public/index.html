@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>鲸窝</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <aside class="rail">
+    <div class="me" id="meBlock">
+      <div class="avatar" id="meAvatar">妈</div>
+      <div class="me-name" id="meName">我</div>
+    </div>
+
+    <nav class="tabs">
+      <button class="tab active" data-view="chat">
+        <span class="ic">💬</span><span class="tx">聊天</span>
+      </button>
+      <button class="tab" data-view="moments">
+        <span class="ic">🌤</span><span class="tx">朋友圈</span>
+      </button>
+      <button class="tab" data-view="stickers">
+        <span class="ic">😺</span><span class="tx">表情</span>
+      </button>
+      <button class="tab" data-view="settings">
+        <span class="ic">⚙️</span><span class="tx">设置</span>
+      </button>
+    </nav>
+
+    <div class="rail-foot" id="conn">连接中…</div>
+  </aside>
+
+  <main class="main">
+    <!-- 聊天 -->
+    <section class="view active" id="view-chat">
+      <header class="chat-head">
+        <div class="avatar sm" id="herAvatar">鲸</div>
+        <div class="chat-who">
+          <div class="nm" id="herName">小助手</div>
+          <div class="st" id="herState">在线</div>
+        </div>
+      </header>
+
+      <div class="log" id="log"></div>
+
+      <footer class="composer">
+        <div class="tools">
+          <button class="tool" id="btnSticker" title="表情">😺</button>
+          <button class="tool" id="btnImage" title="图片">🖼</button>
+          <button class="tool" id="btnFile" title="文件">📎</button>
+        </div>
+        <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送）"></textarea>
+        <button class="send" id="btnSend">发送</button>
+        <input type="file" id="filePicker" multiple hidden />
+      </footer>
+
+      <div class="sticker-pop" id="stickerPop"></div>
+    </section>
+
+    <!-- 朋友圈 -->
+    <section class="view" id="view-moments">
+      <header class="panel-head">
+        <h2>朋友圈</h2>
+        <button class="ghost" id="btnPost">发朋友圈</button>
+      </header>
+      <div class="moments" id="momentList"></div>
+    </section>
+
+    <!-- 表情 -->
+    <section class="view" id="view-stickers">
+      <header class="panel-head">
+        <h2>表情包</h2>
+        <button class="ghost" id="btnAddSticker">添加表情</button>
+      </header>
+      <div class="sticker-grid" id="stickerGrid"></div>
+    </section>
+
+    <!-- 设置 -->
+    <section class="view" id="view-settings">
+      <header class="panel-head"><h2>设置</h2></header>
+      <div class="settings">
+        <div class="srow">
+          <label>她的名字</label>
+          <input id="setHerName" />
+        </div>
+        <div class="srow">
+          <label>她的头像</label>
+          <button class="ghost" id="btnHerAvatar">换一张</button>
+        </div>
+        <div class="srow">
+          <label>我的名字</label>
+          <input id="setMeName" />
+        </div>
+        <div class="srow">
+          <label>我的头像</label>
+          <button class="ghost" id="btnMeAvatar">换一张</button>
+        </div>
+        <p class="hint">改完立刻生效，手机端看到的也是同一份。</p>
+        <div class="srow">
+          <label>通知</label>
+          <button class="ghost" id="btnNotifySettings">打开系统通知设置</button>
+          <button class="ghost" id="btnNotifyTest">发测试通知</button>
+        </div>
+        <p class="hint">手机上如果只有通知栏、没有顶部横幅，去那里把「悬浮通知 / 横幅通知」打开。</p>
+        <p class="hint" id="ver">版本 —</p>
+      </div>
+    </section>
+  </main>
+
+  <div class="mask" id="mask"></div>
+  <div class="modal" id="modal"></div>
+
+  <script src="app.js?v=1"></script>
+</body>
+</html>

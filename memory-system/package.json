@@ -1,0 +1,27 @@
+{
+  "name": "ai-companion-memory",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "给自托管 AI 伴侣用的记忆系统：记忆 / 情绪 / 生活 / 表达 / 反馈 五层，人格只读",
+  "bin": {
+    "companion-memory": "./cli.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "init": "node cli.mjs init",
+    "serve": "node cli.mjs serve",
+    "life": "node cli.mjs life",
+    "doctor": "node cli.mjs doctor",
+    "snapshot": "node cli.mjs snapshot",
+    "verify": "node cli.mjs verify",
+    "eval": "node cli.mjs eval"
+  },
+  "dependencies": {
+    "@xenova/transformers": "^2.17.2",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {}
+}

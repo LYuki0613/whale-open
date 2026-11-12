@@ -1,0 +1,52 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 运行数据（绝不要提交：里面是真实记忆和聊天记录）
+data/
+memory-system/data/
+memory-system/memory/
+memory-system/emotion/
+memory-system/life/
+memory-system/expression/
+memory-system/feedback/
+memory-system/backups/
+memory-system/logs/
+whale-chat/data/
+
+# 模型（几百 MB，自己下）
+models/
+memory-system/models/
+*.onnx
+*.ct2
+
+# 配置（各人不同，提交 example 就够了）
+config.json
+.env
+
+# 鲸窝：运行产物
+whale-chat/dist/
+whale-chat/*.png
+!whale-chat/assets/*.png
+
+# 鲸窝：签名与密钥 —— 永远不要提交
+keystore/
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+
+# Android
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+
+# 杂项
+*.log
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+Thumbs.db
