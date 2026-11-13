@@ -1,8 +1,8 @@
 {
   "name": "whale-chat",
-  "version": "1.17.0",
+  "version": "1.27.0",
   "private": true,
-  "description": "鲸窝 · 自托管 AI 伴侣的聊天端（服务端 + 网页 + Electron 壳 + Android WebView）",
+  "description": "鲸窝 · 自托管 AI 伴侣的聊天端（服务端 + 网页 + Electron 壳 + Android WebView + 插件）",
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",

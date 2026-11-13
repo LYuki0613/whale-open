@@ -34,6 +34,8 @@ function avatarHtml(who, extra) {
 $$('.tab').forEach((btn) => btn.addEventListener('click', () => {
   $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${btn.dataset.view}`));
+  setDrawer(false);
+  if (btn.dataset.view === 'diary') loadDiary();
   if (btn.dataset.view === 'chat') $('#input').focus();
 }));
 
@@ -49,16 +51,74 @@ function bubbleInner(m) {
 }
 
 function renderMessage(m, animate) {
+  if (m.kind === 'poke') {
+    const line = document.createElement('div');
+    line.className = 'msg-poke';
+    line.dataset.id = m.id;
+    line.textContent = m.text || '戳了戳';
+    $('#log').appendChild(line);
+    $('#log').scrollTop = $('#log').scrollHeight;
+    // 她戳我：我这边的头像也抖一下
+    if (m.role === 'her') {
+      const av = $('#meAvatar');
+      if (av) {
+        av.classList.remove('poke');
+        void av.offsetWidth;
+        av.classList.add('poke');
+        setTimeout(() => av.classList.remove('poke'), 600);
+      }
+    }
+    return line;
+  }
   const row = document.createElement('div');
-  row.className = 'msg ' + (m.role === 'me' ? 'me' : 'her');
+  row.className = 'msg ' + (m.role === 'me' ? 'me' : 'her') + (m.recalled ? ' recalled' : '');
+  row.dataset.id = m.id;
   const who = m.role === 'me' ? 'me' : 'her';
-  row.innerHTML = avatarHtml(who) + `<div class="bubble">${bubbleInner(m)}</div>`;
-  if (m.kind === 'file' && m.file) {
+  const q = m.quote
+    ? `<span class="quoted">${m.quote.role === 'me' ? '我' : '她'}：${esc(m.quote.text || '（已撤回）')}</span>`
+    : '';
+  const body = m.recalled ? '撤回了一条消息' : bubbleInner(m);
+  row.innerHTML = avatarHtml(who) + `<div class="bubble">${q}${body}</div>`;
+  if (m.role === 'her') bindPoke(row.querySelector('.av'));
+  if (m.kind === 'file' && m.file && !m.recalled) {
     row.querySelector('.bubble').addEventListener('click', () => window.open(m.file.url, '_blank'));
   }
+  bindMessageActions(row, m);
   if (animate) row.animate([{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 180 });
   $('#log').appendChild(row);
   $('#log').scrollTop = $('#log').scrollHeight;
+  return row;
+}
+
+// 消息操作：桌面右键 / 手机长按
+let sheetTarget = null;
+let sheetOpenedAt = 0;
+function bindMessageActions(row, m) {
+  if (m.recalled) return;
+  row.addEventListener('contextmenu', (e) => { e.preventDefault(); openActSheet(m); });
+  let timer = null;
+  let moved = false;
+  row.addEventListener('touchstart', (e) => {
+    moved = false;
+    timer = setTimeout(() => { if (!moved) openActSheet(m); }, 480);
+  }, { passive: true });
+  row.addEventListener('touchmove', () => { moved = true; clearTimeout(timer); }, { passive: true });
+  row.addEventListener('touchend', () => clearTimeout(timer));
+}
+
+function openActSheet(m) {
+  sheetTarget = m;
+  sheetOpenedAt = Date.now();
+  const sheet = $('#actSheet');
+  if (!sheet) return;
+  sheet.querySelector('[data-act="recall"]').style.display = m.role === 'me' ? '' : 'none';
+  sheet.hidden = false;
+}
+
+function closeActSheet() {
+  const sheet = $('#actSheet');
+  if (sheet) sheet.hidden = true;
+  sheetTarget = null;
 }
 
 function renderAll() {
@@ -114,12 +174,29 @@ async function bootstrap() {
   const r = await fetch('/api/bootstrap');
   const j = await r.json();
   S.me = j.me; S.her = j.her; S.stickers = j.stickers ?? []; S.messages = j.messages ?? [];
+  S.poke = j.poke ?? { me: '戳了戳', her: '拍了拍' };
+  if ($('#setPokeMe')) $('#setPokeMe').value = S.poke.me;
+  if ($('#setPokeHer')) $('#setPokeHer').value = S.poke.her;
   setVersion(j);
   paintWho();
   renderAll();
   renderStickers();
   renderMoments(j.moments ?? []);
+  applyChatBg(j.chatBg);
   $('#conn').textContent = j.agentReady ? '已连接' : '本体未连接';
+}
+
+/** 聊天背景：给了图就用图，没有就恢复默认。 */
+function applyChatBg(file) {
+  const log = $('#log');
+  if (!log) return;
+  if (file?.url) {
+    log.style.backgroundImage = `url("${file.url}")`;
+    log.classList.add('bg');
+  } else {
+    log.style.backgroundImage = '';
+    log.classList.remove('bg');
+  }
 }
 
 // ── 发送 ────────────────────────────────────────────────────────────────
@@ -129,7 +206,12 @@ async function send() {
   if (!text || S.busy) return;
   input.value = '';
   input.style.height = 'auto';
-  await fetch('/api/send', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
+  const quoteId = quoteTarget?.id ?? 0;
+  setQuote(null);
+  await fetch('/api/send', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, quoteId }),
+  });
 }
 
 $('#btnSend').addEventListener('click', send);
@@ -469,9 +551,37 @@ async function saveSetting(k, v) {
   bootstrap();
 }
 $('#setHerName').addEventListener('change', (e) => saveSetting('her.name', e.target.value.trim() || '小助手'));
-$('#setMeName').addEventListener('change', (e) => saveSetting('me.name', e.target.value.trim() || '我'));
+$('#setMeName').addEventListener('change', (e) => saveSetting('me.name', e.target.value.trim() || '对方'));
+$('#setPokeMe')?.addEventListener('change', (e) => saveSetting('poke.verbMe', e.target.value.trim() || '戳了戳'));
+$('#setPokeHer')?.addEventListener('change', (e) => saveSetting('poke.verbHer', e.target.value.trim() || '拍了拍'));
+bindPoke($('#herAvatar'));
 $('#btnHerAvatar').onclick = () => pickAvatar('her');
 $('#btnMeAvatar').onclick = () => pickAvatar('me');
+
+// 聊天背景
+$('#btnChatBg').onclick = async () => {
+  const files = await pickFiles({ accept: 'image/*' });
+  const f = files[0];
+  if (!f) return;
+  try {
+    toast('正在换背景…');
+    const up = await upload(f);
+    await fetch('/api/chat-bg', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ fileId: up.id }),
+    });
+    applyChatBg(up.file ?? up);
+    toast('背景已换');
+  } catch (e) { toast('换背景失败：' + e.message); }
+};
+$('#btnChatBgReset').onclick = async () => {
+  await fetch('/api/chat-bg', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ fileId: 0 }),
+  });
+  applyChatBg(null);
+  toast('已恢复默认');
+};
 
 // 通知设置：手机跳到系统页面，电脑直接提示
 $('#btnNotifyTest').onclick = () => {
@@ -516,6 +626,233 @@ async function pickAvatar(who) {
   }
 }
 
+// ── 插件 ────────────────────────────────────────────────────────────────
+function pluginCard(it) {
+  const on = it.enabled;
+  const st = it.status || {};
+  const last = st.lastRunAt ? new Date(st.lastRunAt).toLocaleString('zh-CN') : '还没跑过';
+  const topics = (st.lastTopics ?? []).slice(0, 5)
+    .map((t) => `<span class="chip">${esc(t.word)}</span>`).join('');
+  const douyin = it.id === 'douyin'
+    ? `<div class="plugin-watch">
+         <input class="plugin-link" id="plink-${it.id}" placeholder="粘贴抖音分享链接，让她看这条" />
+         <button class="ghost" data-plugin-watch="${it.id}">让她看</button>
+       </div>
+       <div class="plugin-actions"><button class="ghost" data-plugin-tick="${it.id}">刷一条视频</button></div>`
+    : '';
+  return `<div class="plugin-card">
+    <div class="plugin-head">
+      <div><b>${esc(it.name)}</b> <span class="hint">v${esc(it.version)}</span></div>
+      <div class="plugin-btns">
+        <button class="ghost" data-plugin-toggle="${it.id}" data-on="${on ? '1' : '0'}">${on ? '禁用' : '启用'}</button>
+        <button class="ghost danger" data-plugin-uninstall="${it.id}">卸载</button>
+      </div>
+    </div>
+    <div class="hint">${esc(it.description)}</div>
+    ${on ? `<div class="plugin-state">上次：${esc(last)}${st.lastError ? ' · 出错：' + esc(st.lastError) : ''}</div>
+      ${topics ? `<div class="plugin-topics">${topics}</div>` : ''}${douyin}
+      <div class="plugin-out" id="plout-${it.id}"></div>` : ''}
+  </div>`;
+}
+
+async function loadPluginsUI() {
+  const el = $('#pluginList');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/plugins');
+    const j = await r.json();
+    const items = j.items ?? [];
+    el.innerHTML = items.length ? items.map(pluginCard).join('') : '<div class="hint">还没有安装任何插件。</div>';
+
+    el.querySelectorAll('[data-plugin-toggle]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        const id = b.dataset.pluginToggle;
+        const on = b.dataset.on === '1';
+        try {
+          await fetch('/api/plugins/toggle', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id, enabled: !on }),
+          });
+        } catch (e) { toast('切换失败：' + e.message); }
+        await loadPluginsUI();
+      });
+    });
+
+    el.querySelectorAll('[data-plugin-uninstall]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const id = b.dataset.pluginUninstall;
+        if (!confirm(`卸载「${id}」？插件目录会被删掉，配置一起没。`)) return;
+        b.disabled = true;
+        try {
+          const r = await fetch('/api/plugins/uninstall', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id }),
+          });
+          const j = await r.json();
+          if (!j.ok) toast('卸载失败：' + (j.error || '?'));
+        } catch (e) { toast('卸载失败：' + e.message); }
+        await loadPluginsUI();
+      });
+    });
+
+    el.querySelectorAll('[data-plugin-tick]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const id = b.dataset.pluginTick;
+        const out = document.getElementById('plout-' + id);
+        b.disabled = true;
+        if (out) out.textContent = '正在刷…';
+        try {
+          const r = await fetch('/api/plugins/action', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id, action: 'tick', args: [true] }),
+          });
+          const j = await r.json();
+          if (out) out.textContent = j.ok ? `刷到 ${j.result?.topics?.length ?? 0} 条` : `失败：${j.error ?? j.result?.error ?? '?'}`;
+        } catch (e) { if (out) out.textContent = '失败：' + e.message; }
+        b.disabled = false;
+        setTimeout(loadPluginsUI, 800);
+      });
+    });
+
+    el.querySelectorAll('[data-plugin-watch]').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const id = b.dataset.pluginWatch;
+        const inp = document.getElementById('plink-' + id);
+        const url = (inp?.value ?? '').trim();
+        const out = document.getElementById('plout-' + id);
+        if (!url) { toast('先粘贴一条链接'); return; }
+        b.disabled = true;
+        if (out) out.textContent = '去看了，下载+抽帧大概要十几秒…';
+        try {
+          const r = await fetch('/api/plugins/action', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ id, action: 'watch', args: [url] }),
+          });
+          const j = await r.json();
+          if (out) out.textContent = j.ok ? `她看完了：${j.result?.said ?? '（没说什么）'}` : `失败：${j.error ?? j.result?.error ?? '?'}`;
+        } catch (e) { if (out) out.textContent = '失败：' + e.message; }
+        b.disabled = false;
+      });
+    });
+  } catch (e) {
+    el.textContent = '插件加载失败：' + e.message;
+  }
+}
+
+// ── 抽屉导航 ────────────────────────────────────────────────────────────
+function setDrawer(on) {
+  document.body.classList.toggle('drawer-open', on);
+}
+$('#btnMenu')?.addEventListener('click', () => setDrawer(!document.body.classList.contains('drawer-open')));
+$('#drawerMask')?.addEventListener('click', () => setDrawer(false));
+
+// ── 消息操作：引用 / 撤回 ───────────────────────────────────────────────
+let quoteTarget = null;
+
+function setQuote(m) {
+  quoteTarget = m ?? null;
+  const bar = $('#quoteBar');
+  if (!bar) return;
+  if (!m) { bar.hidden = true; return; }
+  $('#quoteText').textContent = (m.role === 'me' ? '我' : '她') + '：' + (m.text || m.file?.name || '一条消息').slice(0, 40);
+  bar.hidden = false;
+}
+
+async function recallMessage(m) {
+  if (!m) return;
+  try {
+    const r = await fetch('/api/message/recall', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: m.id }),
+    });
+    const j = await r.json();
+    if (!j.ok) toast(j.error || '撤回失败');
+  } catch (e) { toast('撤回失败：' + e.message); }
+}
+
+$('#actSheet')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act;
+  const m = sheetTarget;
+  closeActSheet();
+  if (act === 'quote' && m) {
+    setQuote(m);
+    $('#input')?.focus();
+    document.querySelector('.composer')?.scrollIntoView({ block: 'end' });
+  } else if (act === 'recall' && m) recallMessage(m);
+});
+document.addEventListener('click', (e) => {
+  const sheet = $('#actSheet');
+  if (!sheet || sheet.hidden) return;
+  // 长按松手那一下也会冒一个 click 出来，不能当成"点了外面"把面板关掉
+  if (Date.now() - sheetOpenedAt < 600) return;
+  if (!e.target.closest('#actSheet')) closeActSheet();
+});
+
+$('#quoteCancel')?.addEventListener('click', () => setQuote(null));
+
+// ── 戳一戳 ──────────────────────────────────────────────────────────────
+let lastPokeAt = 0;
+
+function shakeHer() {
+  const el = $('#herAvatar');
+  if (!el) return;
+  el.classList.remove('poke');
+  void el.offsetWidth;
+  el.classList.add('poke');
+  setTimeout(() => el.classList.remove('poke'), 600);
+}
+
+async function pokeHer() {
+  if (Date.now() - lastPokeAt < 1200) return;
+  lastPokeAt = Date.now();
+  try {
+    const r = await fetch('/api/poke', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ who: 'her' }),
+    });
+    const j = await r.json();
+    if (j.ok) shakeHer();
+  } catch (e) { /* 戳失败就算了 */ }
+}
+
+function bindPoke(el) {
+  if (!el) return;
+  let lastTap = 0;
+  el.addEventListener('dblclick', (e) => { e.preventDefault(); pokeHer(); });
+  el.addEventListener('touchend', () => {
+    const now = Date.now();
+    if (now - lastTap < 320) { pokeHer(); lastTap = 0; }
+    else lastTap = now;
+  });
+}
+
+// ── 日记 ────────────────────────────────────────────────────────────────
+async function loadDiary() {
+  const el = $('#diaryList');
+  if (!el) return;
+  el.innerHTML = '<div class="hint">翻日记中…</div>';
+  try {
+    const r = await fetch('/api/diary');
+    const j = await r.json();
+    const items = j.items ?? [];
+    if (!items.length) { el.innerHTML = '<div class="hint">还没有日记。</div>'; return; }
+    el.innerHTML = items.map((it) => `
+      <article class="diary-item">
+        <div class="diary-head">
+          <span class="diary-date">${esc(it.date)}${it.time ? ' · ' + esc(it.time) : ''}</span>
+          ${it.where ? `<span class="diary-where">${esc(it.where)}</span>` : ''}
+        </div>
+        <div class="diary-text">${esc(it.text).replace(/\n+/g, '<br>')}</div>
+      </article>`).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="hint">读日记失败：${esc(e.message)}</div>`;
+  }
+}
+$('#btnDiaryRefresh')?.addEventListener('click', loadDiary);
+
 // ── 实时事件 ────────────────────────────────────────────────────────────
 function connect() {
   const es = new EventSource(withToken('/api/events'));
@@ -527,6 +864,16 @@ function connect() {
       S.messages.push(d.message);
       renderMessage(d.message, true);
       maybeNotify(d.message);
+    } else if (d.type === 'message/recall') {
+      const m = S.messages.find((x) => x.id === d.id);
+      if (m) {
+        m.recalled = true; m.text = ''; m.quote = null;
+        const row = document.querySelector(`.msg[data-id="${m.id}"]`);
+        if (row) {
+          row.classList.add('recalled');
+          row.querySelector('.bubble').innerHTML = '撤回了一条消息';
+        }
+      }
     } else if (d.type === 'typing') {
       showTyping(d.on);
     } else if (d.type === 'settings') {
@@ -547,6 +894,7 @@ if (matchMedia('(max-width: 760px)').matches) {
 
 bootstrap();
 connect();
+loadPluginsUI();
 
 // 深链接：/#moments、/#stickers、/#settings 直接打开对应页
 const gotoView = (location.hash || '').slice(1);

@@ -2,12 +2,17 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>鲸窝</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=133" />
 </head>
 <body>
-  <aside class="rail">
+  <button class="menu-btn" id="btnMenu" aria-label="菜单">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="drawer-mask" id="drawerMask"></div>
+
+  <aside class="rail" id="rail">
     <div class="me" id="meBlock">
       <div class="avatar" id="meAvatar">妈</div>
       <div class="me-name" id="meName">我</div>
@@ -22,6 +27,9 @@
       </button>
       <button class="tab" data-view="stickers">
         <span class="ic">😺</span><span class="tx">表情</span>
+      </button>
+      <button class="tab" data-view="diary">
+        <span class="ic">📔</span><span class="tx">日记</span>
       </button>
       <button class="tab" data-view="settings">
         <span class="ic">⚙️</span><span class="tx">设置</span>
@@ -45,14 +53,20 @@
       <div class="log" id="log"></div>
 
       <footer class="composer">
-        <div class="tools">
-          <button class="tool" id="btnSticker" title="表情">😺</button>
-          <button class="tool" id="btnImage" title="图片">🖼</button>
-          <button class="tool" id="btnFile" title="文件">📎</button>
+        <div class="quote-bar" id="quoteBar" hidden>
+          <div class="quote-text" id="quoteText"></div>
+          <button class="quote-x" id="quoteCancel" title="取消引用">✕</button>
         </div>
-        <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送）"></textarea>
-        <button class="send" id="btnSend">发送</button>
-        <input type="file" id="filePicker" multiple hidden />
+        <div class="composer-row">
+          <div class="tools">
+            <button class="tool" id="btnSticker" title="表情">😺</button>
+            <button class="tool" id="btnImage" title="图片">🖼</button>
+            <button class="tool" id="btnFile" title="文件">📎</button>
+          </div>
+          <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送）"></textarea>
+          <button class="send" id="btnSend">发送</button>
+          <input type="file" id="filePicker" multiple hidden />
+        </div>
       </footer>
 
       <div class="sticker-pop" id="stickerPop"></div>
@@ -76,6 +90,15 @@
       <div class="sticker-grid" id="stickerGrid"></div>
     </section>
 
+    <!-- 日记 -->
+    <section class="view" id="view-diary">
+      <header class="panel-head">
+        <h2>她的日记</h2>
+        <button class="ghost" id="btnDiaryRefresh">刷新</button>
+      </header>
+      <div class="diary" id="diaryList"></div>
+    </section>
+
     <!-- 设置 -->
     <section class="view" id="view-settings">
       <header class="panel-head"><h2>设置</h2></header>
@@ -97,20 +120,49 @@
           <button class="ghost" id="btnMeAvatar">换一张</button>
         </div>
         <p class="hint">改完立刻生效，手机端看到的也是同一份。</p>
+
+        <div class="srow">
+          <label>聊天背景</label>
+          <button class="ghost" id="btnChatBg">换一张</button>
+          <button class="ghost" id="btnChatBgReset">恢复默认</button>
+        </div>
+
+        <div class="srow">
+          <label>戳一戳 · 我戳她</label>
+          <input id="setPokeMe" maxlength="12" placeholder="戳了戳" />
+        </div>
+        <div class="srow">
+          <label>戳一戳 · 她戳我</label>
+          <input id="setPokeHer" maxlength="12" placeholder="拍了拍" />
+        </div>
+        <p class="hint">双击她的头像就能戳她一下。</p>
+
         <div class="srow">
           <label>通知</label>
           <button class="ghost" id="btnNotifySettings">打开系统通知设置</button>
           <button class="ghost" id="btnNotifyTest">发测试通知</button>
         </div>
         <p class="hint">手机上如果只有通知栏、没有顶部横幅，去那里把「悬浮通知 / 横幅通知」打开。</p>
+
+        <div class="srow">
+          <label>插件</label>
+          <span class="hint inline">给她加点小能力</span>
+        </div>
+        <div class="plugin-list" id="pluginList"></div>
         <p class="hint" id="ver">版本 —</p>
       </div>
     </section>
   </main>
 
+  <div class="act-sheet" id="actSheet" hidden>
+    <button data-act="quote">引用</button>
+    <button data-act="recall">撤回</button>
+    <button data-act="cancel" class="muted">取消</button>
+  </div>
+
   <div class="mask" id="mask"></div>
   <div class="modal" id="modal"></div>
 
-  <script src="app.js?v=1"></script>
+  <script src="app.js?v=133"></script>
 </body>
 </html>

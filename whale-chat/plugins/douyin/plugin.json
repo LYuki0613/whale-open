@@ -1,0 +1,14 @@
+{
+  "id": "douyin",
+  "name": "刷抖音",
+  "version": "0.1.0",
+  "description": "让她刷抖音：定时看热榜（话题+封面），收到分享链接就真去看视频（抽帧）。",
+  "author": "鲸窝",
+  "defaultEnabled": false,
+  "config": {
+    "intervalHours": 3,
+    "maxTopics": 4,
+    "watchFrames": 6,
+    "rememberToMemory": true
+  }
+}

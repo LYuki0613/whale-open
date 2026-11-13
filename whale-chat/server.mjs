@@ -6,7 +6,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -18,11 +18,29 @@ const PORT = Number(process.env.CHAT_PORT || 7501);
 const MEMORY = process.env.MEMORY_BASE || 'http://127.0.0.1:7331';
 const PRESET = process.env.CHAT_PRESET || '';   // 想挂 DSH 的 agent preset 就填它，留空 = 默认 agent
 const CHAT_KEY = process.env.CHAT_KEY || 'local:me';
-const APP_VERSION = process.env.CHAT_VERSION || '1.17';
+const APP_VERSION = process.env.CHAT_VERSION || '1.27';
 const APP_NAME = '鲸窝';
 const ROTATE_AT = Number(process.env.CHAT_ROTATE_AT || 90000);  // 上下文超过这个就换窗口
 const MAX_UPLOAD = 200 * 1024 * 1024;
 const DIARY_DIR = process.env.DIARY_DIR || path.join(DATA, 'diary');
+const PLUGINS_DIR = path.join(DIR, 'plugins');
+const PLUGIN_DATA = path.join(DATA, 'plugins');
+const PLUGIN_PY = process.env.PLUGIN_PYTHON || 'python';
+const FFMPEG = process.env.FFMPEG || 'ffmpeg';
+
+// 小助手的角色卡（和 QQ 那边共用同一份，改了这里也跟着变）
+// 角色卡：默认放在 whale-chat/roles/role.md，也可以用 ROLE_FILE 指到别处
+const ROLE_FILE = process.env.ROLE_FILE || path.join(DIR, 'roles', 'role.md');
+let roleCache = { mtime: 0, text: '' };
+function roleCard() {
+  try {
+    const st = fs.statSync(ROLE_FILE);
+    if (st.mtimeMs !== roleCache.mtime) {
+      roleCache = { mtime: st.mtimeMs, text: fs.readFileSync(ROLE_FILE, 'utf8').trim() };
+    }
+    return roleCache.text;
+  } catch { return ''; }
+}
 
 fs.mkdirSync(FILES, { recursive: true });
 
@@ -139,7 +157,7 @@ const replyQueue = { items: [], firstAt: 0, timer: null };
 function armReplyTimer() {
   if (replyQueue.timer) { clearTimeout(replyQueue.timer); replyQueue.timer = null; }
   if (!replyQueue.items.length) return;
-  const chars = [...replyQueue.items.join('')].length;
+  const chars = [...replyQueue.items.map((i) => i.prompt).join('')].length;
   const want = Math.min(REPLY_MAX_MS, Math.max(REPLY_MS_PER_CHAR, chars * REPLY_MS_PER_CHAR));
   const now = Date.now();
   // 总等待从这一轮第一句算起，绝不拖过 8 秒
@@ -152,15 +170,15 @@ function armReplyTimer() {
 function fireReplyQueue() {
   replyQueue.timer = null;
   if (busy) { replyQueue.timer = setTimeout(fireReplyQueue, 800); return; } // 还在回上一轮，等她说
-  const text = replyQueue.items.join('\n');
+  const text = replyQueue.items.map((i) => i.prompt).join('\n');
   replyQueue.items = [];
   replyQueue.firstAt = 0;
   talk(text).catch((e) => addMessage('her', 'text', `（出错了：${e?.message ?? e}）`));
 }
 
-function queueReply(text) {
+function queueReply(text, prompt = '') {
   if (!replyQueue.items.length) replyQueue.firstAt = Date.now();
-  replyQueue.items.push(text);
+  replyQueue.items.push({ text: String(text), prompt: String(prompt || text) });
   armReplyTimer();
 }
 
@@ -183,7 +201,7 @@ function waitTurnFor(id, ms = 300000) {
   });
 }
 
-/** 读 QQ 桥接的私聊会话 id —— 鲸窝用它，两个入口共用同一个会话。 */
+/** 读 QQ 桥接的私聊会话 id —— 鲸窝用它，两个入口就是同一条小鱼。 */
 function bridgePrivateSession() {
   try {
     // 可选：和别的入口（比如 QQ 桥接）复用同一个 DSH 会话。
@@ -200,7 +218,7 @@ function bridgePrivateSession() {
 async function ensureAgent() {
   if (!dport) return null;
   api = new NodeApiClient(`http://127.0.0.1:${dport}`, undefined, {});
-  // 优先跟别的入口（比如 QQ 桥接）共用同一个会话，两个入口就是同一个她
+  // 优先跟 QQ 私聊共用同一个会话（同一条小鱼）
   const bridged = bridgePrivateSession();
   if (bridged) {
     sessionId = bridged;
@@ -435,6 +453,51 @@ function similar(a, b) {
   return hit / Math.min(ga.size, gb.size);
 }
 
+/** 把一段话切成"气泡"：一句一个，别让三句话挤在同一个气泡里。 */
+function splitBubbles(text) {
+  const hasWord = (s) => /[\p{L}\p{N}]/u.test(s);
+  const out = [];
+  for (const para of String(text ?? '').replace(/\r/g, '').split(/\n+/)) {
+    const t = para.trim();
+    if (!t) continue;
+    // 按句末标点切；切完还是空就当整段
+    const segs = t.split(/(?<=[。！？!?…～~])/).map((s) => s.trim()).filter(Boolean);
+    let carry = '';
+    for (const seg of segs) {
+      if (hasWord(seg)) {
+        out.push((carry + seg).trim());
+        carry = '';
+      } else {
+        carry += seg;   // 纯省略号/标点，攒着并到下一句，不要单独成一个气泡
+      }
+    }
+    if (carry.trim()) {
+      if (out.length) out[out.length - 1] += carry.trim();
+      else out.push(carry.trim());
+    }
+  }
+  return out.filter((s) => hasWord(s));
+}
+
+/** 一句一个气泡，中间留一点"正在打下一句"的时间。 */
+function emitBubbles(parts) {
+  const list = (parts ?? []).filter(Boolean);
+  if (!list.length) return;
+  let i = 0;
+  const step = () => {
+    if (i >= list.length) return;
+    const one = list[i++];
+    addMessage('her', 'text', one);
+    if (i < list.length) {
+      broadcast('typing', { on: true });
+      setTimeout(step, 650 + Math.random() * 550);
+    } else {
+      broadcast('typing', { on: false });   // 最后一个气泡，别再显示"正在输入"
+    }
+  };
+  step();
+}
+
 function emitReply(reply) {
   const actions = [];
   let raw = String(reply ?? "");
@@ -443,7 +506,7 @@ function emitReply(reply) {
   const silent = /\[\[\s*沉默\s*\]\]|\[\s*沉默\s*\]/.test(raw);
   raw = raw.replace(/\[\[\s*沉默\s*\]\]/g, "").replace(/\[\s*沉默\s*\]/g, "");
 
-  const text = raw.replace(/\[\[(sticker|moment|sched|unsched)\s*[:：]\s*([^\]]+)\]\]/g, (_m, kind, val) => {
+  const text = raw.replace(/\[\[(sticker|moment|sched|unsched|poke)\s*[:：]?\s*([^\]]*)\]\]/g, (_m, kind, val) => {
     actions.push({ kind, value: String(val).trim() });
     return "";
   }).trim();
@@ -464,7 +527,7 @@ function emitReply(reply) {
     }
   }
 
-  if (clean) addMessage("her", "text", clean);
+  if (clean) emitBubbles(splitBubbles(clean));
 
   for (const a of actions) {
     if (a.kind === "sticker") {
@@ -495,6 +558,10 @@ function emitReply(reply) {
       db.moments.push(moment);
       save();
       broadcast("moments", {});
+    } else if (a.kind === "poke") {
+      // 她想戳就戳
+      const verb = getSetting("poke.verbHer", "拍了拍");
+      addMessage("her", "poke", `${getSetting("her.name", "小助手")} ${verb} 你`);
     }
   }
   return { spoke: Boolean(clean) || actions.length > 0, silent };
@@ -550,6 +617,7 @@ async function proactiveTick(force = false) {
 
   const prompt = [
     "现在是 " + hhmm + "。",
+    roleCard() ? '【你的角色卡】\n' + roleCard() + '\n（照这张卡说话；这里是鲸窝，只有对方一个人。）' : '',
     quietMin !== null ? "对方上一次说话是 " + quietMin + " 分钟前。" : "对方还没在这个软件里说过话。",
     "上一轮你们聊的是：",
     lastFew || "（还没有聊天记录）",
@@ -560,6 +628,7 @@ async function proactiveTick(force = false) {
     "- 最多两三句，像微信里随手发的那种，不要长篇大论。",
     "- 不要每次都问「在吗」，不要重复上次说过的话。",
     "- 如果要发，只输出正文；如果不发，只输出 [[沉默]]。",
+    "- 想只戳她一下（不发文字）就输出 [[poke]]；想说话又想戳，就正常写正文，末尾单独一行 [[poke]]。",
     "- 想发表情就单独一行写 [[sticker:表情名]]。",
     "- 想发朋友圈就单独一行写 [[moment:内容]]（可以只发这一条，不必同时说话）。",
   ].join("\n");
@@ -921,13 +990,18 @@ async function talk(userText) {
         ? `你能用这些表情包：${stickerNames.join('、')}。想发就把 [[sticker:表情名]] 单独写一行（名字要一字不差）。`
         : '你还没有可用的表情包（对方可以在「表情」里加）。',
       '想发朋友圈就把 [[moment:内容]] 单独写一行（不超过 60 字）。',
+      '想戳对方一下（不配文字也行）就单独写一行 [[poke]]——被晾着、想引起注意、或者撒娇的时候可以用。',
       '如果这句不想接（比如对方只是说「嗯嗯」「我去吃饭了」「晚安」），就只输出 [[沉默]]，什么都别说，也不要解释。',
       recentMoments ? `朋友圈最近动态（你能看到）：\n${recentMoments}` : '',
     ].filter(Boolean);
 
     const prompt = [
       mem, '',
+      roleCard()
+        ? '【你的角色卡】\n' + roleCard() + '\n（照这张卡说话。这里是鲸窝，只有对方一个人，不用管群聊、网友那些部分。）'
+        : '',
       '（对方在自己做的聊天软件里跟你说话，只会有她一个人。）',
+      '【这里是鲸窝，不是 QQ】上面那套「分条 / 单条不超过 30 字 / 潜水 / 唤醒 / 文本不算发送」的规矩在这里全部不适用：你打出来的每一个字都会原样出现在聊天窗口里。想说什么就说完，一两句可以，三四句也行，想分段就分段，不用为了短而短，也别把话憋成一句。',
       '',
       '【定时消息】',
       '你可以把一句话定在未来的某个时间点发出。',
@@ -988,6 +1062,165 @@ async function talk(userText) {
   }
 }
 
+// ── 插件系统 ────────────────────────────────────────────────────────────
+// plugins/<id>/plugin.json + index.mjs；开启状态存在 db.settings 的 plugin.<id>.enabled。
+const plugins = new Map();
+
+/** 给"她"发一段话（可带图）并拿回她的回答，不写进聊天记录。 */
+async function agentAsk(text, imageFiles = []) {
+  if (!api || !sessionId) return '';
+  // 她可能正在回消息，等一会儿（最多 45 秒）再问，别把插件的话插进半截对话里
+  for (let i = 0; i < 23 && busy; i += 1) await new Promise((r) => setTimeout(r, 2000));
+  if (!api || !sessionId || busy) return '';
+  const parts = [{ type: 'text', text }];
+  for (const f of imageFiles.slice(0, 8)) {
+    try {
+      const buf = fs.readFileSync(f);
+      if (buf.length <= 8 * 1024 * 1024) {
+        parts.push({ type: 'image', mediaType: 'image/jpeg', data: buf.toString('base64'), name: path.basename(f) });
+      }
+    } catch {}
+  }
+  const w = waitTurnFor(sessionId, 180000);
+  const acc = await api.sessions.prompt({ sessionId, mode: 'queue', content: parts });
+  if (!acc?.result?.ok) return '';
+  try { return String(await w).trim(); } catch { return ''; }
+}
+
+/** 往记忆库写一条（插件用）。 */
+async function addMemory({ kind = 'episode', text, importance = 0.4 }) {
+  if (!text) return;
+  try {
+    await fetch(MEMORY + '/memory', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind, text, importance, source: CHAT_KEY }),
+    });
+  } catch {}
+}
+
+function makePluginCtx(manifest) {
+  const id = manifest.id;
+  return {
+    id,
+    manifest,
+    dir: manifest.__dir,   // 插件代码目录
+    log: (m) => {
+      const line = `${new Date().toISOString()} [${id}] ${m}`;
+      console.log('[plugin] ' + line);
+      try { fs.appendFileSync(path.join(DATA, 'plugin.log'), line + '\n'); } catch {}
+    },
+    setting: (k, d) => {
+      const v = getSetting(`plugin.${id}.${k}`, '');
+      return v === '' ? (manifest.config?.[k] ?? d) : v;
+    },
+    setSetting: (k, v) => setSetting(`plugin.${id}.${k}`, v),
+    getState: () => { try { return JSON.parse(getSetting(`plugin.${id}.state`, '{}')); } catch { return {}; } },
+    setState: (v) => setSetting(`plugin.${id}.state`, JSON.stringify(v)),
+    dataDir: (sub = '') => {
+      const p = path.join(PLUGIN_DATA, id, sub);
+      fs.mkdirSync(p, { recursive: true });
+      return p;
+    },
+    paths: { py: PLUGIN_PY, ffmpeg: FFMPEG },
+    agentAsk,
+    addMemory,
+  };
+}
+
+function pluginManifest(dirName) {
+  const dir = path.join(PLUGINS_DIR, dirName);
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(dir, 'plugin.json'), 'utf8'));
+    return { ...m, id: m.id || dirName, __dir: dir };
+  } catch { return null; }
+}
+
+function pluginDirs() {
+  try {
+    return fs.readdirSync(PLUGINS_DIR, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  } catch { return []; }
+}
+
+function listPlugins() {
+  return pluginDirs().map((name) => {
+    const m = pluginManifest(name);
+    if (!m) return null;
+    const inst = plugins.get(m.id);
+    return {
+      id: m.id,
+      name: m.name || m.id,
+      description: m.description || '',
+      version: m.version || '0.0.0',
+      enabled: Boolean(inst),
+      config: m.config ?? {},
+      status: (() => { try { return inst?.status?.() ?? null; } catch { return null; } })(),
+    };
+  }).filter(Boolean);
+}
+
+async function startPlugin(id) {
+  const m = pluginManifest(id);
+  if (!m) throw new Error('插件不存在: ' + id);
+  const mod = await import(pathToFileURL(path.join(m.__dir, 'index.mjs')).href);
+  const plugin = mod.default ?? mod;
+  const ctx = makePluginCtx(m);
+  if (typeof plugin.start === 'function') await plugin.start(ctx);
+  plugins.set(id, plugin);
+  setSetting(`plugin.${id}.enabled`, '1');
+  console.log('[plugin] ' + id + ' 已启动');
+}
+
+function stopPlugin(id) {
+  const inst = plugins.get(id);
+  try { inst?.stop?.(); } catch {}
+  plugins.delete(id);
+  setSetting(`plugin.${id}.enabled`, '0');
+  console.log('[plugin] ' + id + ' 已停止');
+}
+
+async function loadPlugins() {
+  for (const name of pluginDirs()) {
+    const m = pluginManifest(name);
+    if (!m) continue;
+    const saved = getSetting(`plugin.${m.id}.enabled`, '');
+    const enabled = saved === '' ? Boolean(m.defaultEnabled) : saved === '1';
+    if (!enabled) continue;
+    try { await startPlugin(m.id); }
+    catch (e) { console.error('[plugin] ' + m.id + ' 启动失败:', e?.message ?? e); }
+  }
+}
+
+// ── 日记 ────────────────────────────────────────────────────────────────
+/** 读她的日记（按月份文件，新的在前）。 */
+function readDiary(limit = 120) {
+  const out = [];
+  let files = [];
+  try {
+    files = fs.readdirSync(DIARY_DIR).filter((f) => /^\d{4}-\d{2}\.md$/.test(f)).sort().reverse();
+  } catch { return out; }
+  for (const f of files) {
+    let raw = '';
+    try { raw = fs.readFileSync(path.join(DIARY_DIR, f), 'utf8'); } catch { continue; }
+    for (const part of raw.split(/^## /m).slice(1)) {
+      const nl = part.indexOf('\n');
+      const head = (nl >= 0 ? part.slice(0, nl) : part).trim();
+      const body = (nl >= 0 ? part.slice(nl + 1) : '').trim();
+      const m = /^(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2})?\s*(?:·\s*(.*))?$/.exec(head);
+      out.push({
+        month: f.replace(/\.md$/, ''),
+        date: m ? m[1] : head.slice(0, 10),
+        time: m && m[2] ? m[2] : '',
+        where: m && m[3] ? m[3] : '',
+        text: body,
+      });
+    }
+    if (out.length >= limit * 2) break;
+  }
+  out.sort((a, b) => (b.date + (b.time || '')).localeCompare(a.date + (a.time || '')));
+  return out.slice(0, limit);
+}
+
 // ── HTTP 工具 ───────────────────────────────────────────────────────────
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -1038,7 +1271,15 @@ function serveFile(req, res, file) {
 const fileView = (f) => f && { id: f.id, name: f.name, mime: f.mime, size: f.size, url: `/api/file/${f.id}` };
 
 function bootstrapPayload() {
-  const messages = db.messages.slice(-80).map((m) => ({ ...m, file: m.fileId ? fileView(findFile(m.fileId)) : null }));
+  const byId = new Map(db.messages.map((m) => [m.id, m]));
+  const messages = db.messages.slice(-80).map((m) => {
+    const q = m.quoteId ? byId.get(m.quoteId) : null;
+    return {
+      ...m,
+      file: m.fileId ? fileView(findFile(m.fileId)) : null,
+      quote: q ? { id: q.id, role: q.role, text: q.recalled ? '' : String(q.text ?? '').slice(0, 60), kind: q.kind } : null,
+    };
+  });
   const stickers = db.stickers.map((s) => ({ id: s.id, name: s.name, fileId: s.fileId, file: fileView(findFile(s.fileId)) })).filter((s) => s.file);
   const moments = db.moments.slice(-30).reverse().map((m) => ({
     ...m,
@@ -1052,6 +1293,8 @@ function bootstrapPayload() {
     her: { name: getSetting('her.name', '小助手'), avatar: fileView(findFile(getSetting('her.avatar', 0))) },
     messages, stickers, moments, busy, agentReady: !!sessionId,
     version: APP_VERSION, appName: APP_NAME, session: sessionId,
+    chatBg: fileView(findFile(getSetting('chat.bg', 0))),
+    poke: { me: getSetting('poke.verbMe', '戳了戳'), her: getSetting('poke.verbHer', '拍了拍') },
   };
 }
 
@@ -1079,10 +1322,73 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
       const text = String(body.text ?? '').trim();
       if (!text) return json(res, 400, { ok: false, error: '空的' });
-      addMessage('me', 'text', text);
+      const mine = addMessage('me', 'text', text);
+      const quoteId = Number(body.quoteId);
+      let promptText = text;
+      if (quoteId) {
+        const q = db.messages.find((m) => m.id === quoteId);
+        if (q && !q.recalled) {
+          mine.quoteId = quoteId;
+          save();
+          const who = q.role === 'me' ? getSetting('me.name', '对方') : '你';
+          promptText = `（${who}被引用的话：「${String(q.text ?? '').slice(0, 200)}」）\n${text}`;
+        }
+      }
+      broadcast('message/quote', { id: mine.id, quoteId: quoteId || 0 });
       noteUserReply();
-      queueReply(text);
+      queueReply(text, promptText);
+      // 「叫她去刷抖音」：她说两句之后，插件真去刷一条（12 秒后，让她先把话说完）
+      if (/(刷|看)[^。！？\n]{0,6}(抖音|视频)/.test(text)) {
+        setTimeout(() => {
+          const inst = plugins.get('douyin');
+          if (inst?.actions?.tick) inst.actions.tick(true).catch(() => {});
+        }, 12000);
+      }
+      return json(res, 200, { ok: true, id: mine.id });
+    }
+
+    // 撤回：连同"待回队列"一起清掉——撤回的话不需要她回应
+    if (p === '/api/message/recall' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const id = Number(b.id);
+      const m = db.messages.find((x) => x.id === id);
+      if (!m) return json(res, 404, { ok: false, error: '没有这条消息' });
+      if (m.recalled) return json(res, 200, { ok: true, already: true });
+
+      const oldText = String(m.text ?? '');
+      m.recalled = true;
+      m.kind = 'text';
+      m.text = '';
+      m.fileId = null;
+      m.quoteId = null;
+      save();
+      broadcast('message/recall', { id });
+
+      if (m.role === 'me' && oldText.trim()) {
+        const i = replyQueue.items.findIndex((it) => it.text === oldText.trim());
+        if (i >= 0) {
+          replyQueue.items.splice(i, 1);
+          if (!replyQueue.items.length) {
+            if (replyQueue.timer) clearTimeout(replyQueue.timer);
+            replyQueue.timer = null;
+            replyQueue.firstAt = 0;
+            broadcast('typing', { on: false });
+          } else {
+            armReplyTimer();
+          }
+        }
+      }
       return json(res, 200, { ok: true });
+    }
+
+    // 聊天背景图（存文件 id；0 = 恢复默认）
+    if (p === '/api/chat-bg' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const fid = Number(b.fileId) || 0;
+      if (fid && !findFile(fid)) return json(res, 400, { ok: false, error: '文件不存在' });
+      setSetting('chat.bg', String(fid));
+      broadcast('settings', {});
+      return json(res, 200, { ok: true, file: fid ? fileView(findFile(fid)) : null });
     }
 
     if (p === '/api/upload' && req.method === 'POST') {
@@ -1114,15 +1420,84 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
 
+    // 戳一戳：双击头像触发
+    if (p === '/api/poke' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const who = String(b.who ?? 'her');
+      const herName = getSetting('her.name', '小助手');
+      const meName = getSetting('me.name', '对方');
+      if (who === 'her') {
+        const verb = getSetting('poke.verbMe', '戳了戳');
+        const line = `你 ${verb} ${herName}`;
+        addMessage('me', 'poke', line);
+        // 让她有反应（15 秒冷却，别连着戳把人烦死）
+        const last = Number(getSetting('poke.lastAt', 0)) || 0;
+        if (Date.now() - last > 15000) {
+          setSetting('poke.lastAt', Date.now());
+          setTimeout(() => {
+            queueReply(`（${meName}${verb}了你一下）`, `（${meName}${verb}了你一下，你要有反应。别客套，按你的性格来。）`);
+          }, 300);
+        }
+        return json(res, 200, { ok: true, line });
+      }
+      const verb = getSetting('poke.verbHer', '拍了拍');
+      const line = `${herName} ${verb} 你`;
+      addMessage('her', 'poke', line);
+      return json(res, 200, { ok: true, line });
+    }
+
     if (p === '/api/settings' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
       for (const [k, v] of Object.entries(body)) {
-        if (!/^(me|her)\.(name|avatar)$/.test(k)) continue;
-        db.settings[k] = String(v);
+        if (!/^(me|her)\.(name|avatar)$/.test(k) && !/^poke\.verb(Me|Her)$/.test(k)) continue;
+        db.settings[k] = String(v).slice(0, 20);
       }
       save();
       broadcast('settings', {});
       return json(res, 200, { ok: true });
+    }
+
+    if (p === '/api/diary' && req.method === 'GET') {
+      return json(res, 200, { ok: true, items: readDiary(), dir: DIARY_DIR });
+    }
+
+    if (p === '/api/plugins' && req.method === 'GET') {
+      return json(res, 200, { ok: true, items: listPlugins() });
+    }
+
+    if (p === '/api/plugins/toggle' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const id = String(b.id ?? '');
+      if (!id) return json(res, 400, { ok: false, error: '缺 id' });
+      try {
+        if (b.enabled) await startPlugin(id); else stopPlugin(id);
+        return json(res, 200, { ok: true, items: listPlugins() });
+      } catch (e) {
+        return json(res, 500, { ok: false, error: String(e?.message ?? e) });
+      }
+    }
+
+    if (p === '/api/plugins/uninstall' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const id = String(b.id ?? '');
+      if (!pluginDirs().includes(id)) return json(res, 400, { ok: false, error: '没有这个插件' });
+      try { stopPlugin(id); } catch {}
+      try { fs.rmSync(path.join(PLUGINS_DIR, id), { recursive: true, force: true }); }
+      catch (e) { return json(res, 500, { ok: false, error: '删不掉：' + (e?.message ?? e) }); }
+      return json(res, 200, { ok: true, items: listPlugins() });
+    }
+
+    if (p === '/api/plugins/action' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const inst = plugins.get(String(b.id ?? ''));
+      const fn = inst?.actions?.[String(b.action ?? '')];
+      if (typeof fn !== 'function') return json(res, 400, { ok: false, error: '没有这个动作' });
+      try {
+        const args = Array.isArray(b.args) ? b.args : [];
+        return json(res, 200, { ok: true, result: await fn(...args) });
+      } catch (e) {
+        return json(res, 500, { ok: false, error: String(e?.message ?? e) });
+      }
     }
 
     if (p === '/api/stickers' && req.method === 'POST') {
@@ -1272,7 +1647,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-try { await ensureAgent(); pump(); await ensureDigestSession(); startProactiveHeartbeat(); startScheduler(); } catch (e) { console.error('[chat] 初始化会话失败:', e?.message ?? e); }
+try { await ensureAgent(); pump(); await ensureDigestSession(); startProactiveHeartbeat(); startScheduler(); await loadPlugins(); } catch (e) { console.error('[chat] 初始化会话失败:', e?.message ?? e); }
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[chat] http://127.0.0.1:${PORT}`);
