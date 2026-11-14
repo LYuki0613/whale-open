@@ -87,8 +87,8 @@
 
 ### 直接下载安装包（Windows 64 位）
 
-- GitHub Releases：见本仓库右侧 **Releases**（`whale-chat-<版本>.exe`）
 - 夸克网盘（国内直连）：https://pan.quark.cn/s/025ee38cdfda
+- GitHub Releases：**目前还没发布**（暂时只提供网盘；想要的话也可以自己按 `使用笔记.md` 构建）
 
 > 安装包**没有代码签名**，首次运行 Windows 会提示「未知发布者」→ 点「更多信息 → 仍要运行」。
 > 装完看到「本体未连接」是正常的 —— 它是壳，你还要按下面的步骤装 DSH、填 Key。
