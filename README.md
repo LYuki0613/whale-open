@@ -87,10 +87,10 @@
 
 ### 直接下载（Windows 桌面版 + Android 手机版）
 
+- GitHub Releases（推荐，支持自动更新）：https://github.com/LYuki0613/whale-open/releases/latest
 - 夸克网盘（国内直连，一个链接两个版本）：https://pan.quark.cn/s/c54fec97f47b
   - `鲸窝-1.27.0-安装包.exe` —— Windows 桌面版（约 100 MB）
   - `鲸窝-1.27.0.apk` —— Android 手机版（约 170 KB，只是个壳）
-- GitHub Releases：**目前还没发布**（暂时只提供网盘；想要的话也可以自己按 `使用笔记.md` 构建）
 
 **手机版怎么连**：手机和电脑连同一个 Wi-Fi → 打开 App → 填电脑的局域网地址（桌面版设置页有「手机连接地址」，点「复制」）。
 注意手机版只是窗口，**电脑关机就连不上了**。
