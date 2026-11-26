@@ -21,7 +21,16 @@ window.fetch = (u, o) => rawFetch(withToken(u), o);
 
 const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : (n / 1024).toFixed(0) + ' KB');
 const esc = (s) => String(s ?? '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
-const timeText = (ts) => new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+function timeText(ts) {
+  const d = new Date(Number(ts) || Date.now());
+  const now = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const hm = p(d.getHours()) + ':' + p(d.getMinutes());
+  if (d.toDateString() === now.toDateString()) return hm;
+  const y = new Date(now); y.setDate(now.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return '昨天 ' + hm;
+  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;
+}
 
 function avatarHtml(who, extra) {
   const a = S[who];
@@ -36,21 +45,60 @@ $$('.tab').forEach((btn) => btn.addEventListener('click', () => {
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${btn.dataset.view}`));
   setDrawer(false);
   if (btn.dataset.view === 'diary') loadDiary();
+  if (btn.dataset.view === 'game') showShelf();
   if (btn.dataset.view === 'chat') $('#input').focus();
 }));
 
 // ── 消息渲染 ────────────────────────────────────────────────────────────
-function bubbleInner(m) {
-  if (m.kind === 'image' && m.file) return `<img class="photo" src="${m.file.url}" alt="">`;
+function bubbleInner(m) {  if (m.kind === 'image' && m.file) return `<img class="photo" src="${m.file.url}" alt="">`;
   if (m.kind === 'sticker' && m.file) return `<img class="sticker" src="${m.file.url}" alt="">`;
   if (m.kind === 'video' && m.file) return `<video src="${m.file.url}" controls preload="metadata"></video>`;
+  if (m.kind === 'voice' && m.file) {
+    const secs = Number(m.duration) || Math.max(1, Math.round((m.file.size || 0) / 16000));
+    return `<div class="voice" data-src="${m.file.url}">
+      <span class="vplay">▶</span>
+      <span class="vwave">${'｜'.repeat(Math.min(12, Math.max(4, secs)))}</span>
+      <span class="vsec">${secs}"</span>
+    </div>`;
+  }
   if (m.kind === 'file' && m.file) {
     return `<div class="fname">📎 ${esc(m.file.name)}</div><div class="fsize">${fmtSize(m.file.size)} · 点一下下载</div>`;
   }
   return esc(m.text);
 }
 
+let currentVoice = null;
+function playVoice(box) {
+  const src = box.dataset.src;
+  if (!src) return;
+  try {
+    if (currentVoice) { currentVoice.pause(); currentVoice = null; }
+    const a = new Audio(src);
+    currentVoice = a;
+    box.classList.add('playing');
+    a.onended = () => { box.classList.remove('playing'); currentVoice = null; };
+    a.onerror = () => { box.classList.remove('playing'); currentVoice = null; };
+    a.play().catch(() => box.classList.remove('playing'));
+  } catch { box.classList.remove('playing'); }
+}
+
+/** 每条消息进来先看看要不要插一个时间分隔（跨分钟才插） */
+function addTimeSepIfNeeded(m) {
+  const log = $('#log');
+  if (!log) return;
+  const t = timeText(m.at);
+  const seps = log.querySelectorAll('.time-sep');
+  const last = seps.length ? seps[seps.length - 1].textContent : '';
+  if (t !== last) {
+    const sep = document.createElement('div');
+    sep.className = 'time-sep';
+    sep.textContent = t;
+    log.appendChild(sep);
+  }
+}
+
 function renderMessage(m, animate) {
+  addTimeSepIfNeeded(m);
   if (m.kind === 'poke') {
     const line = document.createElement('div');
     line.className = 'msg-poke';
@@ -83,6 +131,13 @@ function renderMessage(m, animate) {
   if (m.kind === 'file' && m.file && !m.recalled) {
     row.querySelector('.bubble').addEventListener('click', () => window.open(m.file.url, '_blank'));
   }
+  if (m.kind === 'voice' && m.file && !m.recalled) {
+    const box = row.querySelector('.voice');
+    if (box) box.addEventListener('click', (e) => {
+      e.stopPropagation();
+      playVoice(box);
+    });
+  }
   bindMessageActions(row, m);
   if (animate) row.animate([{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 180 });
   $('#log').appendChild(row);
@@ -97,13 +152,43 @@ function bindMessageActions(row, m) {
   if (m.recalled) return;
   row.addEventListener('contextmenu', (e) => { e.preventDefault(); openActSheet(m); });
   let timer = null;
-  let moved = false;
+  let startX = 0;
+  let startY = 0;
+  let fired = false;
+  // 长按判定：手指抖动不超过 12px 就算「没动」（以前只要有一点点 touchmove 就取消，
+  // 真机上几乎永远触发不了）
   row.addEventListener('touchstart', (e) => {
-    moved = false;
-    timer = setTimeout(() => { if (!moved) openActSheet(m); }, 480);
+    const t = e.touches?.[0];
+    if (!t) return;
+    fired = false;
+    startX = t.clientX;
+    startY = t.clientY;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (fired) return;
+      fired = true;
+      try { navigator.vibrate?.(12); } catch {}
+      openActSheet(m);
+    }, 420);
   }, { passive: true });
-  row.addEventListener('touchmove', () => { moved = true; clearTimeout(timer); }, { passive: true });
+  row.addEventListener('touchmove', (e) => {
+    const t = e.touches?.[0];
+    if (!t) return;
+    const dx = Math.abs(t.clientX - startX);
+    const dy = Math.abs(t.clientY - startY);
+    if (dx > 12 || dy > 12) { clearTimeout(timer); }
+  }, { passive: true });
   row.addEventListener('touchend', () => clearTimeout(timer));
+  row.addEventListener('touchcancel', () => clearTimeout(timer));
+
+  // 兜底：轻点文字消息也能弹出操作条（长按在某些机型上会被系统吃掉）
+  if (m.kind === 'text') {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('a')) return;
+      if (fired) { fired = false; return; }   // 刚从长按过来，别再弹一次
+      openActSheet(m);
+    });
+  }
 }
 
 function openActSheet(m) {
@@ -123,30 +208,35 @@ function closeActSheet() {
 
 function renderAll() {
   $('#log').innerHTML = '';
-  let lastMin = '';
   for (const m of S.messages) {
-    const t = timeText(m.at);
-    if (t !== lastMin) {
-      lastMin = t;
-      const sep = document.createElement('div');
-      sep.className = 'time-sep';
-      sep.textContent = t;
-      $('#log').appendChild(sep);
-    }
-    renderMessage(m, false);
+    renderMessage(m, false);   // 时间分隔由 renderMessage 自己处理
   }
 }
 
+// ── 状态栏：在线 / 离线 · 心情，打字时变成"对方正在输入中" ────────────────
+let typingOn = false;
+let presenceState = { online: true, mood: '' };
+
+function renderStatus() {
+  const el = document.getElementById('herState');
+  if (!el) return;
+  if (typingOn) {
+    el.textContent = '对方正在输入中';
+    el.classList.add('live');
+    return;
+  }
+  el.classList.remove('live');
+  const bits = [presenceState.online ? '在线' : '离线'];
+  if (presenceState.mood) bits.push(presenceState.mood);
+  el.textContent = bits.join(' · ');
+}
+
 function showTyping(on) {
-  let el = document.getElementById('typing');
-  if (on && !el) {
-    el = document.createElement('div');
-    el.id = 'typing';
-    el.className = 'typing';
-    el.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span><span>她在想…</span>';
-    $('#log').appendChild(el);
-    $('#log').scrollTop = $('#log').scrollHeight;
-  } else if (!on && el) el.remove();
+  typingOn = Boolean(on);
+  renderStatus();
+  // 旧版本那个"她在想…"的占位行，存在就清掉
+  const old = document.getElementById('typing');
+  if (old) old.remove();
 }
 
 // ── 头像/名字 ───────────────────────────────────────────────────────────
@@ -177,12 +267,21 @@ async function bootstrap() {
   S.poke = j.poke ?? { me: '戳了戳', her: '拍了拍' };
   if ($('#setPokeMe')) $('#setPokeMe').value = S.poke.me;
   if ($('#setPokeHer')) $('#setPokeHer').value = S.poke.her;
+  if ($('#setWeatherCity')) $('#setWeatherCity').value = j.weatherCity ?? '';
+  if ($('#lanUrl')) $('#lanUrl').value = j.lanUrl || '';
+  S.profiles = j.profiles ?? {};
+  presenceState = {
+    online: Boolean(j.presence?.online ?? true),
+    mood: String(j.presence?.mood ?? ''),
+  };
+  renderStatus();
   setVersion(j);
   paintWho();
   renderAll();
   renderStickers();
   renderMoments(j.moments ?? []);
   applyChatBg(j.chatBg);
+  applyGameCovers(j.gameCovers ?? {});
   $('#conn').textContent = j.agentReady ? '已连接' : '本体未连接';
 }
 
@@ -554,7 +653,21 @@ $('#setHerName').addEventListener('change', (e) => saveSetting('her.name', e.tar
 $('#setMeName').addEventListener('change', (e) => saveSetting('me.name', e.target.value.trim() || '对方'));
 $('#setPokeMe')?.addEventListener('change', (e) => saveSetting('poke.verbMe', e.target.value.trim() || '戳了戳'));
 $('#setPokeHer')?.addEventListener('change', (e) => saveSetting('poke.verbHer', e.target.value.trim() || '拍了拍'));
+$('#setWeatherCity')?.addEventListener('change', (e) => saveSetting('weather.city', e.target.value.trim()));
+$('#btnCopyLan')?.addEventListener('click', async () => {
+  const v = $('#lanUrl')?.value || '';
+  if (!v) return;
+  try {
+    await navigator.clipboard.writeText(v);
+    toast('地址已复制');
+  } catch {
+    $('#lanUrl').select?.();
+    toast('长按选中复制');
+  }
+});
 bindPoke($('#herAvatar'));
+// 导航栏那张自己的头像 → 我的主页
+$('#meAvatar')?.addEventListener('click', (e) => { e.preventDefault(); openProfile('me'); });
 $('#btnHerAvatar').onclick = () => pickAvatar('her');
 $('#btnMeAvatar').onclick = () => pickAvatar('me');
 
@@ -644,6 +757,7 @@ function pluginCard(it) {
     <div class="plugin-head">
       <div><b>${esc(it.name)}</b> <span class="hint">v${esc(it.version)}</span></div>
       <div class="plugin-btns">
+        ${it.link ? `<a class="ghost" href="${esc(it.link.url)}" target="_blank" rel="noreferrer">${esc(it.link.label || '打开')}</a>` : ''}
         <button class="ghost" data-plugin-toggle="${it.id}" data-on="${on ? '1' : '0'}">${on ? '禁用' : '启用'}</button>
         <button class="ghost danger" data-plugin-uninstall="${it.id}">卸载</button>
       </div>
@@ -787,11 +901,106 @@ document.addEventListener('click', (e) => {
   const sheet = $('#actSheet');
   if (!sheet || sheet.hidden) return;
   // 长按松手那一下也会冒一个 click 出来，不能当成"点了外面"把面板关掉
-  if (Date.now() - sheetOpenedAt < 600) return;
+  if (Date.now() - sheetOpenedAt < 900) return;
   if (!e.target.closest('#actSheet')) closeActSheet();
 });
 
 $('#quoteCancel')?.addEventListener('click', () => setQuote(null));
+
+// ── 个人主页 ────────────────────────────────────────────────────────────
+let profileWho = 'her';
+
+function fmtSince(ts) {
+  const d = new Date(Number(ts) || Date.now());
+  const p = (n) => String(n).padStart(2, '0');
+  return `注册于 ${d.getFullYear()}.${p(d.getMonth() + 1)}.${p(d.getDate())}`;
+}
+
+function renderProfile(p) {
+  if (!p) return;
+  $('#profileName').textContent = p.name || '';
+  $('#profileUid').textContent = '@' + (p.uid || '');
+  $('#profileBio').textContent = p.bio || '（还没写签名）';
+  $('#profileSince').textContent = fmtSince(p.since);
+  const av = $('#profileAvatar');
+  av.innerHTML = p.avatar?.url ? `<img src="${p.avatar.url}" alt="">` : `<span>${(p.name || '?').slice(0, 1)}</span>`;
+  const bg = $('#profileBg');
+  bg.style.backgroundImage = p.bg?.url ? `url("${p.bg.url}")` : '';
+  bg.classList.toggle('has-img', Boolean(p.bg?.url));
+}
+
+function openProfile(who) {
+  profileWho = who;
+  const p = S.profiles?.[who];
+  if (!p) return;
+  setDrawer(false);
+  renderProfile(p);
+  const panel = $('#profileEditPanel');
+  if (panel) panel.hidden = true;
+  const inp = $('#profileBioInput');
+  if (inp) inp.value = p.bio || '';
+  $('#profileView').hidden = false;
+  document.body.classList.add('profile-open');
+}
+
+function closeProfile() {
+  $('#profileView').hidden = true;
+  document.body.classList.remove('profile-open');
+}
+
+$('#profileBack')?.addEventListener('click', closeProfile);
+$('#profileEdit')?.addEventListener('click', () => {
+  const panel = $('#profileEditPanel');
+  if (!panel) return;
+  panel.hidden = !panel.hidden;
+  const p = S.profiles?.[profileWho];
+  if (!panel.hidden && p) $('#profileBioInput').value = p.bio || '';
+});
+$('#profileCancel')?.addEventListener('click', () => { $('#profileEditPanel').hidden = true; });
+$('#profileSave')?.addEventListener('click', async () => {
+  const bio = String($('#profileBioInput').value ?? '').trim().slice(0, 60);
+  try {
+    const r = await fetch('/api/profile', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ who: profileWho, bio }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '保存失败');
+    S.profiles[profileWho] = j.profile;
+    renderProfile(j.profile);
+    $('#profileEditPanel').hidden = true;
+    toast('签名已保存');
+  } catch (e) { toast('保存失败：' + e.message); }
+});
+$('#profileBgBtn')?.addEventListener('click', async () => {
+  const files = await pickFiles({ accept: 'image/*' });
+  if (!files[0]) return;
+  try {
+    toast('正在换背景…');
+    const up = await upload(files[0]);
+    const r = await fetch('/api/profile', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ who: profileWho, bg: up.id }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '设置失败');
+    S.profiles[profileWho] = j.profile;
+    renderProfile(j.profile);
+    toast('背景已换');
+  } catch (e) { toast('换背景失败：' + e.message); }
+});
+$('#profileAvatarBtn')?.addEventListener('click', async () => {
+  const files = await pickFiles({ accept: 'image/*' });
+  if (!files[0]) return;
+  try {
+    const up = await upload(files[0]);
+    await saveSetting(profileWho === 'me' ? 'me.avatar' : 'her.avatar', String(up.id));
+    await bootstrap();
+    const p = S.profiles?.[profileWho];
+    if (p) renderProfile(p);
+    toast('头像已换');
+  } catch (e) { toast('换头像失败：' + e.message); }
+});
 
 // ── 戳一戳 ──────────────────────────────────────────────────────────────
 let lastPokeAt = 0;
@@ -821,13 +1030,92 @@ async function pokeHer() {
 function bindPoke(el) {
   if (!el) return;
   let lastTap = 0;
-  el.addEventListener('dblclick', (e) => { e.preventDefault(); pokeHer(); });
-  el.addEventListener('touchend', () => {
+  let timer = null;
+  el.addEventListener('click', (e) => {
+    e.preventDefault();
     const now = Date.now();
-    if (now - lastTap < 320) { pokeHer(); lastTap = 0; }
-    else lastTap = now;
+    if (now - lastTap < 320) {
+      // 第二下：戳一戳
+      clearTimeout(timer);
+      lastTap = 0;
+      pokeHer();
+      return;
+    }
+    lastTap = now;
+    // 单击：打开她的主页（等一下，别和双击抢）
+    timer = setTimeout(() => {
+      lastTap = 0;
+      openProfile('her');
+    }, 320);
   });
 }
+
+// ── 小游戏卡带 ──────────────────────────────────────────────────────────
+function showShelf() {
+  const shelf = $('#gameShelf'); const stage = $('#gameStage'); const back = $('#gameBack');
+  if (shelf) shelf.hidden = false;
+  if (stage) stage.hidden = true;
+  if (back) back.hidden = true;
+}
+
+function openCart(id) {
+  const shelf = $('#gameShelf'); const stage = $('#gameStage'); const back = $('#gameBack');
+  if (shelf) shelf.hidden = true;
+  if (stage) stage.hidden = false;
+  if (back) back.hidden = false;
+  if (id === 'gomoku') {
+    window.Gomoku?.mount();
+    setTimeout(() => window.dispatchEvent(new Event('resize')), 40);
+  }
+}
+
+function applyGameCovers(covers = {}) {
+  const el = $('#cartCover-gomoku');
+  const url = covers.gomoku?.url;
+  if (el) {
+    if (url) { el.style.backgroundImage = `url("${url}")`; el.classList.add('has-img'); }
+    else { el.style.backgroundImage = ''; el.classList.remove('has-img'); }
+  }
+  const pv = $('#coverPreviewGomoku');
+  if (pv) {
+    if (url) { pv.src = url; pv.hidden = false; }
+    else { pv.removeAttribute('src'); pv.hidden = true; }
+  }
+}
+
+$('#gameShelf')?.addEventListener('click', (e) => {
+  const c = e.target.closest('.cart');
+  if (c) openCart(c.dataset.game);
+});
+$('#gameBack')?.addEventListener('click', showShelf);
+
+$('#btnCoverGomoku')?.addEventListener('click', async () => {
+  const files = await pickFiles({ accept: 'image/*' });
+  const f = files[0];
+  if (!f) return;
+  try {
+    toast('正在换封面…');
+    const up = await upload(f);
+    const r = await fetch('/api/game/cover', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'gomoku', fileId: up.id }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || ('HTTP ' + r.status));
+    applyGameCovers({ gomoku: j.file ?? up });
+    toast('封面已换');
+  } catch (e) { toast('换封面失败：' + e.message); }
+});
+$('#btnCoverGomokuReset')?.addEventListener('click', async () => {
+  const r = await fetch('/api/game/cover', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: 'gomoku', fileId: 0 }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { toast('恢复失败：' + (j.error || r.status)); return; }
+  applyGameCovers({});
+  toast('已恢复默认封面');
+});
 
 // ── 日记 ────────────────────────────────────────────────────────────────
 async function loadDiary() {
@@ -874,8 +1162,26 @@ function connect() {
           row.querySelector('.bubble').innerHTML = '撤回了一条消息';
         }
       }
+    } else if (d.type === 'message/quote') {
+      // 服务端补发的引用信息：把气泡重画一遍，让引用块立刻出现
+      const m = S.messages.find((x) => x.id === d.id);
+      if (m && d.quoteId && !m.quote) {
+        const q = S.messages.find((x) => x.id === d.quoteId);
+        if (q) {
+          m.quoteId = d.quoteId;
+          m.quote = { id: q.id, role: q.role, text: String(q.text ?? '').slice(0, 60), kind: q.kind };
+          const row = document.querySelector(`.msg[data-id="${m.id}"]`);
+          if (row) row.replaceWith(renderMessage(m, false));
+        }
+      }
     } else if (d.type === 'typing') {
       showTyping(d.on);
+    } else if (d.type === 'presence') {
+      presenceState = { online: Boolean(d.online), mood: String(d.mood ?? '') };
+      renderStatus();
+    } else if (d.type === 'profiles') {
+      S.profiles = d;
+      if (!$('#profileView').hidden) { const p = S.profiles?.[profileWho]; if (p) renderProfile(p); }
     } else if (d.type === 'settings') {
       bootstrap();
     } else if (d.type === 'moments') {

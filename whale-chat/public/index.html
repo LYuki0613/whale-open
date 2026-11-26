@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>鲸窝</title>
-  <link rel="stylesheet" href="style.css?v=133" />
+  <link rel="stylesheet" href="style.css?v=146" />
 </head>
 <body>
   <button class="menu-btn" id="btnMenu" aria-label="菜单">
@@ -30,6 +30,9 @@
       </button>
       <button class="tab" data-view="diary">
         <span class="ic">📔</span><span class="tx">日记</span>
+      </button>
+      <button class="tab" data-view="game">
+        <span class="ic">🎮</span><span class="tx">小游戏</span>
       </button>
       <button class="tab" data-view="settings">
         <span class="ic">⚙️</span><span class="tx">设置</span>
@@ -99,6 +102,39 @@
       <div class="diary" id="diaryList"></div>
     </section>
 
+    <!-- 小游戏 -->
+    <section class="view" id="view-game">
+      <header class="panel-head">
+        <h2>小游戏</h2>
+        <button class="ghost" id="gameBack" hidden>← 卡带</button>
+      </header>
+
+      <div class="game-shelf" id="gameShelf">
+        <button class="cart" data-game="gomoku">
+          <span class="cart-peg"></span>
+          <span class="cart-cover" id="cartCover-gomoku"><em>五子棋</em></span>
+          <span class="cart-label"><b>五子棋</b><i>和她对弈</i></span>
+        </button>
+        <div class="cart-tip">点一下卡带，插进去</div>
+      </div>
+
+      <div class="game-stage" id="gameStage" hidden>
+        <div class="game-card">
+          <div class="game-title">
+            <b>五子棋</b>
+            <span class="hint inline">你执黑先行，她执白</span>
+          </div>
+          <canvas id="gomokuBoard" class="gomoku"></canvas>
+          <div class="game-status" id="gomokuStatus">你先走（黑棋）</div>
+          <div class="game-actions">
+            <button class="ghost" id="gomokuUndo">悔棋</button>
+            <button class="ghost" id="gomokuReset">重新开始</button>
+          </div>
+          <div class="game-talk" id="gomokuTalk"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- 设置 -->
     <section class="view" id="view-settings">
       <header class="panel-head"><h2>设置</h2></header>
@@ -138,6 +174,24 @@
         <p class="hint">双击她的头像就能戳她一下。</p>
 
         <div class="srow">
+          <label>卡带封面 · 五子棋</label>
+          <img class="cover-preview" id="coverPreviewGomoku" alt="" hidden />
+          <button class="ghost" id="btnCoverGomoku">换一张</button>
+          <button class="ghost" id="btnCoverGomokuReset">恢复默认</button>
+        </div>
+
+        <div class="srow">
+          <label>手机连接地址</label>
+          <input id="lanUrl" readonly placeholder="没连上局域网" />
+          <button class="ghost" id="btnCopyLan">复制</button>
+        </div>
+
+        <div class="srow">
+          <label>天气城市</label>
+          <input id="setWeatherCity" maxlength="20" placeholder="留空＝按 IP 自动" />
+        </div>
+
+        <div class="srow">
           <label>通知</label>
           <button class="ghost" id="btnNotifySettings">打开系统通知设置</button>
           <button class="ghost" id="btnNotifyTest">发测试通知</button>
@@ -163,6 +217,38 @@
   <div class="mask" id="mask"></div>
   <div class="modal" id="modal"></div>
 
-  <script src="app.js?v=133"></script>
+  <!-- 个人主页 -->
+  <div class="profile" id="profileView" hidden>
+    <div class="profile-bg" id="profileBg"></div>
+    <div class="profile-veil"></div>
+    <div class="profile-bar">
+      <button class="profile-btn" id="profileBack" title="返回">‹</button>
+      <button class="profile-btn" id="profileEdit" title="编辑">✎</button>
+    </div>
+    <div class="profile-body">
+      <div class="profile-avatar" id="profileAvatar">鲸</div>
+      <div class="profile-name" id="profileName"></div>
+      <div class="profile-uid" id="profileUid"></div>
+      <div class="profile-bio" id="profileBio"></div>
+    </div>
+    <div class="profile-since" id="profileSince"></div>
+
+    <div class="profile-edit" id="profileEditPanel" hidden>
+      <div class="pe-title">编辑主页</div>
+      <div class="pe-row">
+        <button class="ghost" id="profileBgBtn">换背景</button>
+        <button class="ghost" id="profileAvatarBtn">换头像</button>
+      </div>
+      <label class="pe-label">签名</label>
+      <input id="profileBioInput" maxlength="60" placeholder="写一句话…" />
+      <div class="pe-row">
+        <button class="ghost" id="profileCancel">取消</button>
+        <button class="send" id="profileSave">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="gomoku.js?v=2" type="module"></script>
+  <script src="app.js?v=146"></script>
 </body>
 </html>

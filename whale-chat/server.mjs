@@ -6,6 +6,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import { synthesize, hasTts, accountInfo, DEFAULT_VOICE } from './tts.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
@@ -16,11 +18,11 @@ const FILES = path.join(DATA, 'files');
 const DB_FILE = path.join(DATA, 'db.json');
 const PORT = Number(process.env.CHAT_PORT || 7501);
 const MEMORY = process.env.MEMORY_BASE || 'http://127.0.0.1:7331';
-const PRESET = process.env.CHAT_PRESET || '';   // 想挂 DSH 的 agent preset 就填它，留空 = 默认 agent
+const PRESET = process.env.CHAT_PRESET || '';
 const CHAT_KEY = process.env.CHAT_KEY || 'local:me';
-const APP_VERSION = process.env.CHAT_VERSION || '1.27';
+const APP_VERSION = process.env.CHAT_VERSION || '1.38';
 const APP_NAME = '鲸窝';
-const ROTATE_AT = Number(process.env.CHAT_ROTATE_AT || 90000);  // 上下文超过这个就换窗口
+const ROTATE_AT = Number(process.env.CHAT_ROTATE_AT || 200000);  // 上下文超过这个就换窗口（约 1.3 MB 会话文件）
 const MAX_UPLOAD = 200 * 1024 * 1024;
 const DIARY_DIR = process.env.DIARY_DIR || path.join(DATA, 'diary');
 const PLUGINS_DIR = path.join(DIR, 'plugins');
@@ -29,7 +31,6 @@ const PLUGIN_PY = process.env.PLUGIN_PYTHON || 'python';
 const FFMPEG = process.env.FFMPEG || 'ffmpeg';
 
 // 小助手的角色卡（和 QQ 那边共用同一份，改了这里也跟着变）
-// 角色卡：默认放在 whale-chat/roles/role.md，也可以用 ROLE_FILE 指到别处
 const ROLE_FILE = process.env.ROLE_FILE || path.join(DIR, 'roles', 'role.md');
 let roleCache = { mtime: 0, text: '' };
 function roleCard() {
@@ -125,15 +126,12 @@ function broadcast(type, data = {}) {
 }
 
 // ── DSH 桥 ──────────────────────────────────────────────────────────────
-// DSH 的 API 客户端：随仓库自带（vendor/），不依赖外部工程
-const { NodeApiClient, unwrap, createTurnCollector, discoverDshSessionCookie } = await import(
-  new URL('./vendor/dsh-client.js', import.meta.url).href
-);
+// 默认用仓库自带的 vendor/dsh-client.js；想换成别的实现就设 DSH_CLIENT
+const DSH_CLIENT = process.env.DSH_CLIENT
+  || new URL('./vendor/dsh-client.js', import.meta.url).href;
+const { NodeApiClient, unwrap, createTurnCollector, discoverDshSessionCookie } = await import(DSH_CLIENT);
 
 function dshPort() {
-  // 显式指定最省事：DSH_PORT=xxxxx
-  if (process.env.DSH_PORT) return Number(process.env.DSH_PORT) || 0;
-  if (process.env.CHAT_NO_AGENT === '1') return 0;   // 只看界面 / 没有 DSH 时用
   try {
     const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
       "(Get-NetTCPConnection -State Listen | Where-Object { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName -like 'DeepSeek Harness*' } | Select-Object -First 1).LocalPort"],
@@ -143,7 +141,7 @@ function dshPort() {
   } catch { return 0; }
 }
 
-const dport = dshPort();
+let dport = dshPort();
 let api = null, sessionId = null, digestSessionId = null;
 let busy = false;
 
@@ -173,7 +171,23 @@ function fireReplyQueue() {
   const text = replyQueue.items.map((i) => i.prompt).join('\n');
   replyQueue.items = [];
   replyQueue.firstAt = 0;
-  talk(text).catch((e) => addMessage('her', 'text', `（出错了：${e?.message ?? e}）`));
+  talk(text).catch(async (e) => {
+    const msg = String(e?.message ?? e);
+    // DSH 重启 / cookie 过期会报 401 或 transport failure：重连一次再试，
+    // 不要直接把她"卡死"在这里（以前只能重启程序才能恢复）
+    if (/401|transport failure|ECONNREFUSED|not connected|没连上/i.test(msg)) {
+      console.log('[chat] 和 DSH 的连接断了（' + msg + '），重连后重试');
+      try {
+        await ensureAgent();
+        await talk(text);
+        return;
+      } catch (e2) {
+        addMessage('her', 'text', `（出错了：${String(e2?.message ?? e2)}）`);
+        return;
+      }
+    }
+    addMessage('her', 'text', `（出错了：${msg}）`);
+  });
 }
 
 function queueReply(text, prompt = '') {
@@ -204,8 +218,6 @@ function waitTurnFor(id, ms = 300000) {
 /** 读 QQ 桥接的私聊会话 id —— 鲸窝用它，两个入口就是同一条小鱼。 */
 function bridgePrivateSession() {
   try {
-    // 可选：和别的入口（比如 QQ 桥接）复用同一个 DSH 会话。
-    // 设了 CHAT_BRIDGE_STATE 指向它的 sessions.json 才生效，否则纯本机。
     const f = process.env.CHAT_BRIDGE_STATE;
     if (!f) return '';
     const raw = JSON.parse(fs.readFileSync(f, "utf8"));
@@ -300,7 +312,9 @@ async function injectFor(text) {
     const t = setTimeout(() => ctrl.abort(), 4000);
     const r = await fetch(u, { signal: ctrl.signal });
     clearTimeout(t);
-    return String((await r.json())?.text ?? '');
+    const s = String((await r.json())?.text ?? '');
+    // 记忆压到 1500 字以内：人格卡才是主角，别让一堆条目把它淹了
+    return s.length > 1500 ? s.slice(0, 1500) + '\n（后面还有，省了）' : s;
   } catch { return ''; }
 }
 
@@ -311,14 +325,44 @@ function observe(text) {
   }).catch(() => {});
 }
 
-function addMessage(role, kind, text, fileId = null) {
+// ── 她的声音 ────────────────────────────────────────────────────────────
+/** 把一段话合成语音，存成文件并发一条语音消息 */
+async function speakAsVoice(text) {
+  if (!hasTts()) { console.log('[voice] 没有 TTS key，跳过'); return; }
+  try {
+    broadcast('typing', { on: true });
+    const buf = await synthesize(text);
+    const rel = crypto.randomUUID() + '.mp3';
+    fs.mkdirSync(FILES, { recursive: true });
+    fs.writeFileSync(path.join(FILES, rel), buf);
+    const file = { id: nextId('file'), name: 'voice.mp3', mime: 'audio/mpeg', size: buf.length, path: rel, at: Date.now() };
+    db.files.push(file);
+    save();
+    const secs = Math.max(1, Math.round(buf.length / 16000));   // 128kbps ≈ 16KB/s
+    const msg = addMessage('her', 'voice', text, file.id);
+    msg.duration = secs;
+    save();
+    broadcast('message', { message: { ...msg, file: fileView(file), duration: secs } });
+  } catch (e) {
+    console.log('[voice] 合成失败：' + (e?.message ?? e));
+  } finally {
+    broadcast('typing', { on: false });
+  }
+}
+
+function addMessage(role, kind, text, fileId = null, quoteOf = null) {
   const msg = { id: nextId('msg'), role, kind, text: text ?? '', fileId, at: Date.now() };
   // 关键：推给前端的消息必须带 file，否则刚发出去的表情/图片是空白（刷新才出现）
   if (fileId) msg.file = fileView(findFile(fileId));
+  if (quoteOf) msg.quoteId = quoteOf.id;
   db.messages.push(msg);
   if (db.messages.length > 5000) db.messages = db.messages.slice(-4000);
   save();
-  broadcast('message', { message: msg });
+  // 引用也要一起推，否则刚发出去那条气泡里看不到引用块（要刷新才出现）
+  const quote = quoteOf
+    ? { id: quoteOf.id, role: quoteOf.role, text: String(quoteOf.text ?? '').slice(0, 60), kind: quoteOf.kind }
+    : null;
+  broadcast('message', { message: { ...msg, quote } });
   return msg;
 }
 
@@ -381,7 +425,7 @@ async function runDigest() {
             kind,
             text,
             importance: Math.min(0.95, Math.max(0.3, Number(it?.importance) || 0.6)),
-            source: CHAT_KEY,
+            source: 'local:mom',
           }),
         });
         if (r.ok) written += 1;
@@ -506,7 +550,7 @@ function emitReply(reply) {
   const silent = /\[\[\s*沉默\s*\]\]|\[\s*沉默\s*\]/.test(raw);
   raw = raw.replace(/\[\[\s*沉默\s*\]\]/g, "").replace(/\[\s*沉默\s*\]/g, "");
 
-  const text = raw.replace(/\[\[(sticker|moment|sched|unsched|poke)\s*[:：]?\s*([^\]]*)\]\]/g, (_m, kind, val) => {
+  const text = raw.replace(/\[\[(sticker|moment|sched|unsched|poke|voice)\s*[:：]?\s*([^\]]*)\]\]/g, (_m, kind, val) => {
     actions.push({ kind, value: String(val).trim() });
     return "";
   }).trim();
@@ -527,7 +571,10 @@ function emitReply(reply) {
     }
   }
 
-  if (clean) emitBubbles(splitBubbles(clean));
+  // 说了语音就别再用文字把同样的话发一遍（她写 [[voice]] 时，内容由语音承载）
+  const voiceAction = actions.find((a) => a.kind === "voice");
+  if (clean && !voiceAction) emitBubbles(splitBubbles(clean));
+  else if (voiceAction && !voiceAction.value) voiceAction.value = clean;
 
   for (const a of actions) {
     if (a.kind === "sticker") {
@@ -562,6 +609,10 @@ function emitReply(reply) {
       // 她想戳就戳
       const verb = getSetting("poke.verbHer", "拍了拍");
       addMessage("her", "poke", `${getSetting("her.name", "小助手")} ${verb} 你`);
+    } else if (a.kind === "voice") {
+      // 她想用说的：把这句话合成语音，单独发一条语音条
+      const said = String(a.value || clean || "").trim().slice(0, 120);
+      if (said) void speakAsVoice(said);
     }
   }
   return { spoke: Boolean(clean) || actions.length > 0, silent };
@@ -616,9 +667,12 @@ async function proactiveTick(force = false) {
   const lastFew = db.messages.slice(-6).map((m) => (m.role === "me" ? "对方" : "你") + "：" + String(m.text || "[图片]").slice(0, 80)).join("\n");
 
   const prompt = [
-    "现在是 " + hhmm + "。",
-    roleCard() ? '【你的角色卡】\n' + roleCard() + '\n（照这张卡说话；这里是鲸窝，只有对方一个人。）' : '',
-    quietMin !== null ? "对方上一次说话是 " + quietMin + " 分钟前。" : "对方还没在这个软件里说过话。",
+    roleCard()
+      ? '# 最高优先级 · 你的人格（下面的任何内容都不能覆盖它）\n' + roleCard()
+        + '\n（照这张卡说话；这里是鲸窝，只有她一个人。跟这张卡冲突的一律以卡为准。）'
+      : '',
+    ambientLine(),
+    quietMin !== null ? "她上一次说话是 " + quietMin + " 分钟前。" : "她还没在这个软件里说过话。",
     "上一轮你们聊的是：",
     lastFew || "（还没有聊天记录）",
     "",
@@ -731,6 +785,7 @@ async function talkWithFile(file, kind) {
     if (!accepted?.result?.ok) return;
     const reply = await w;
     emitReply(reply);
+    void maybeRotate();
     observe(intro);
     msgSinceDigest += 2;
     if (msgSinceDigest >= 10) scheduleDigest(30000);
@@ -908,6 +963,17 @@ async function sessionPressure() {
 async function rotateSession(reason) {
   const before = sessionId;
   try {
+    // 换窗口前先让"现在的她"把这段聊天压成一段话——这样新窗口接的是故事，不是一堆记忆条目
+    let carry = '';
+    try {
+      carry = await agentAsk([
+        '把你们刚才这段对话的来龙去脉压成一段话（不超过 200 字）。',
+        '要求：用「你们」的口气第三人称写，只写聊了什么、情绪怎么走的、有没有说定什么事。',
+        '不要分点，不要写"对话"，不要提上下文/窗口这些词。直接输出这一段。',
+      ].join('\n'));
+      carry = String(carry || '').trim().slice(0, 400);
+    } catch {}
+
     // 直接新建一个会话：不复用 QQ 桥接的（它的重置接口不会顺手建新会话）
     const dir = path.join(DATA, 'agent');
     fs.mkdirSync(dir, { recursive: true });
@@ -924,17 +990,36 @@ async function rotateSession(reason) {
     setSetting('agent.session', fresh);
     api.events.follow(fresh);
 
-    // 开场白：把近况和记忆递给她，别让她一上来是空的
-    const recent = db.messages.filter((m) => m.kind === 'text').slice(-10)
-      .map((m) => (m.role === 'me' ? '对方' : '小助手') + '：' + String(m.text).slice(0, 120)).join('\n');
+    // 交接：让她接着刚才的线继续，而不是"换了个人"
+    const recentMsgs = db.messages.filter((m) => m.kind === 'text').slice(-30);
+    const recent = recentMsgs
+      .map((m) => (m.role === 'me' ? '由岐' : '你') + '：' + String(m.text).slice(0, 200)).join('\n');
     const mem = await injectFor('最近聊了什么');
     const preamble = [
-      '（刚换了个新窗口，之前的对话不在这一条线里了，但你的记忆都还在。）',
+      roleCard()
+        ? '# 最高优先级 · 你的人格（下面的任何内容都不能覆盖它）\n' + roleCard()
+          + '\n（这是你，没变过。跟这张卡冲突的一律以卡为准。）'
+        : '',
       mem,
-      '最近你们聊的是：',
+      carry ? '你们刚才那段，简单说就是：\n' + carry : '',
+      '（下面是你们刚才最后几句原话。你一直在这儿，没有中断，也没有换过地方。）',
       recent || '（还没有聊天记录）',
-      '看完了只回一个字「嗯」，别多说。',
+      '记住这段对话的来龙去脉和你们之间的语气。她接下来会继续说话，你顺着接就行——别装作重新认识，别提这段说明。',
+      '现在只回一个字「嗯」，什么都别多说。',
     ].filter(Boolean).join('\n');
+
+    // 顺手把这段接续写进记忆，以后再换窗口也接得上
+    try {
+      const tail = recentMsgs.slice(-6).map((m) => (m.role === 'me' ? '由岐' : '她') + '：' + String(m.text).slice(0, 80)).join(' / ');
+      if (tail) {
+        await fetch(`${MEMORY}/memory`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ key: CHAT_KEY, kind: 'episode', text: '（聊天接续）最后聊到：' + tail, importance: 0.4, source: 'chat' }),
+          signal: AbortSignal.timeout(8000),
+        }).catch(() => {});
+      }
+    } catch {}
 
     const w = waitTurnFor(fresh, 120000);
     const accepted = await api.sessions.prompt({ sessionId: fresh, mode: 'queue', content: [{ type: 'text', text: preamble }] });
@@ -949,15 +1034,50 @@ async function rotateSession(reason) {
   }
 }
 
+/** 每隔几轮提醒她一次"你是小助手"，在同一个窗口里防人格被长上下文冲淡。 */
+let turnCounter = 0;
+function personaNudge() {
+  turnCounter += 1;
+  if (turnCounter % 6 !== 0) return '';
+  const herName = getSetting('her.name', '小助手');
+  return `（提醒你自己：你是${herName}，性格照角色卡——会傲娇、会黏人、句子短，会「哼」「笨蛋」「才不要」，别变成客客气气的客服。）`;
+}
+
 /** 每轮对话后看要不要换窗口（10 分钟最多换一次）。 */
 let lastRotateCheck = 0;
+
+/** 拿不到 DSH 的压力投影时，用「换窗口以来聊了多少字」估一个。 */
+function approxPressure() {
+  const since = Number(getSetting('agent.rotatedAt', 0)) || 0;
+  let chars = 0;
+  for (const m of db.messages) {
+    if (Number(m.at) >= since) chars += String(m.text || '').length;
+  }
+  return Math.round(chars / 3.2);   // 中文大约 3 个字 1 token
+}
+
+/** 会话文件有多大（DSH 把整条会话写在这，拿它当上下文压力的兜底信号）。 */
+function sessionFileKB() {
+  try {
+    const root = path.join(os.homedir(), '.dsh', 'sessions');
+    if (!fs.existsSync(root)) return 0;
+    for (const ws of fs.readdirSync(root)) {
+      const p = path.join(root, ws, sessionId, 'session.v4.jsonl.zstd');
+      if (fs.existsSync(p)) return Math.round(fs.statSync(p).size / 1024);
+    }
+  } catch {}
+  return 0;
+}
+
 async function maybeRotate() {
   if (Date.now() - lastRotateCheck < 10 * 60 * 1000) return;
   lastRotateCheck = Date.now();
-  const pressure = await sessionPressure();
+  // 三种信号取最大：DSH 投影（可能拿不到）、聊天字数估计、会话文件体积
+  const kb = sessionFileKB();
+  const pressure = Math.max(await sessionPressure(), approxPressure(), Math.round(kb * 150));
   if (pressure < ROTATE_AT) return;
-  console.log("[chat] 上下文压力", Math.round(pressure / 1000) + "k ≥", Math.round(ROTATE_AT / 1000) + "k，准备轮换");
-  await rotateSession("pressure " + Math.round(pressure / 1000) + "k");
+  console.log("[chat] 上下文压力", Math.round(pressure / 1000) + "k ≥", Math.round(ROTATE_AT / 1000) + "k（会话文件 " + kb + " KB），准备轮换");
+  await rotateSession("pressure " + Math.round(pressure / 1000) + "k / " + kb + "KB");
 }
 /** 从用户的话里判断"是不是在要求定时"。 */
 function looksLikeSchedule(text) {
@@ -967,6 +1087,139 @@ function looksLikeSchedule(text) {
 }
 
 /** 一轮对话：自然速度，她思考多久就多久。 */
+// ── 局域网地址（给手机填）──────────────────────────────────────────────
+function lanUrl() {
+  try {
+    const cands = [];
+    for (const list of Object.values(os.networkInterfaces())) {
+      for (const ni of list ?? []) {
+        if (ni.family !== 'IPv4' || ni.internal) continue;
+        const ip = ni.address;
+        if (/^169\.254\./.test(ip)) continue;        // 自动分配的废地址
+        if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) continue; // Tailscale 之类
+        let score = 0;
+        if (/^192\.168\./.test(ip)) score = 3;       // 家里最常见的
+        else if (/^10\./.test(ip)) score = 2;
+        else if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) score = 2;
+        cands.push({ ip, score });
+      }
+    }
+    cands.sort((a, b) => b.score - a.score);
+    if (cands.length) return `http://${cands[0].ip}:${PORT}`;
+  } catch {}
+  return '';
+}
+
+// ── 心情（读记忆系统的情绪状态，给状态栏用）────────────────────────────
+let moodCache = { at: 0, text: '' };
+
+async function refreshMood() {
+  try {
+    const r = await fetch(`${MEMORY}/emotion`, { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const m = /【现在的心情】([^（\n]+)/.exec(String(j.text ?? ''));
+    moodCache = { at: Date.now(), text: (m ? m[1] : '').trim() };
+    broadcast('presence', presence());
+  } catch { /* 心情取不到就不显示 */ }
+}
+refreshMood();
+setInterval(refreshMood, 60 * 1000);
+
+function presence() {
+  return { online: Boolean(api && sessionId), mood: moodCache.text };
+}
+
+/** 每人的主页 id / 注册日，没有就生成一个存起来 */
+function uidOf(who) {
+  const key = `${who}.uid`;
+  let v = getSetting(key, '');
+  if (!v) {
+    v = String(100000 + Math.floor(Math.random() * 899999));
+    setSetting(key, v);
+  }
+  return v;
+}
+
+function sinceOf() {
+  const first = db.messages[0]?.at;
+  return first || Date.now();
+}
+
+function profileOf(who) {
+  const isMe = who === 'me';
+  return {
+    who,
+    name: getSetting(isMe ? 'me.name' : 'her.name', isMe ? '对方' : '小助手'),
+    avatar: fileView(findFile(getSetting(isMe ? 'me.avatar' : 'her.avatar', 0))),
+    bio: getSetting(isMe ? 'me.bio' : 'her.bio', ''),
+    bg: fileView(findFile(getSetting(isMe ? 'me.profBg' : 'her.profBg', 0))),
+    uid: uidOf(who),
+    since: sinceOf(),
+  };
+}
+
+// ── 时间 / 天气：让她知道今天几号、外面什么天 ──────────────────────────
+function nowText() {
+  const d = new Date();
+  const wd = '日一二三四五六'[d.getDay()];
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 星期${wd} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+let weatherCache = { at: 0, text: '' };
+
+// wttr.in 的天气代码 → 中文（那边 lang_zh 有时不给）
+const WCODE = {
+  113: '晴', 116: '局部多云', 119: '多云', 122: '阴', 143: '薄雾', 248: '雾', 260: '冻雾',
+  176: '零星小雨', 263: '毛毛雨', 266: '细雨', 293: '小雨', 296: '小雨', 299: '中雨',
+  302: '中雨', 305: '大雨', 308: '暴雨', 353: '阵雨', 356: '强阵雨', 359: '暴雨',
+  200: '雷阵雨', 386: '雷阵雨', 389: '强雷阵雨', 179: '阵雪', 182: '雨夹雪', 185: '冻雨',
+  227: '吹雪', 230: '暴风雪', 320: '小雪', 323: '小雪', 326: '中雪', 329: '大雪',
+  332: '大雪', 335: '暴雪', 338: '暴雪', 350: '冰粒', 362: '雨夹雪', 365: '雨夹雪',
+  368: '阵雪', 371: '强阵雪', 374: '冰粒', 377: '冰粒', 392: '雷雪', 395: '强雷雪',
+};
+
+async function refreshWeather() {
+  const city = String(getSetting('weather.city', '') || '').trim();
+  const url = city
+    ? `https://wttr.in/${encodeURIComponent(city)}?format=j1&lang=zh`
+    : 'https://wttr.in/?format=j1&lang=zh';
+  try {
+    const r = await fetch(url, {
+      signal: AbortSignal.timeout(15000),
+      headers: { 'user-agent': 'curl/8.5.0' },
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const c = j.current_condition?.[0] ?? {};
+    const d = j.weather?.[0] ?? {};
+    const area = j.nearest_area?.[0]?.areaName?.[0]?.value || city || '';
+    const desc = String(
+      WCODE[Number(c.weatherCode)] || c.lang_zh?.[0]?.value || c.weatherDesc?.[0]?.value || '',
+    ).trim();
+    const rain = d.hourly?.[4]?.chanceofrain;
+    const bits = [
+      desc,
+      c.temp_C !== undefined ? `${c.temp_C}℃（体感 ${c.FeelsLikeC}℃）` : '',
+      d.mintempC !== undefined ? `今天 ${d.mintempC}~${d.maxtempC}℃` : '',
+      rain !== undefined && rain !== '' ? `降雨概率 ${rain}%` : '',
+    ].filter(Boolean);
+    weatherCache = { at: Date.now(), text: (city ? city + '：' : '') + bits.join('，') };
+    console.log('[weather] ' + weatherCache.text);
+  } catch (e) {
+    console.log('[weather] 取天气失败：' + (e?.message ?? e));
+  }
+}
+refreshWeather();
+setInterval(refreshWeather, 30 * 60 * 1000);
+
+/** 每轮对话开头那行"现在几点、外面什么天" */
+function ambientLine() {
+  return [`现在是 ${nowText()}。`, weatherCache.text ? `外面：${weatherCache.text}` : '']
+    .filter(Boolean).join(' ');
+}
+
 async function talk(userText) {
   if (!api || !sessionId) throw new Error('DSH 没连上');
   if (busy) throw new Error('她还在回上一条');
@@ -991,21 +1244,31 @@ async function talk(userText) {
         : '你还没有可用的表情包（对方可以在「表情」里加）。',
       '想发朋友圈就把 [[moment:内容]] 单独写一行（不超过 60 字）。',
       '想戳对方一下（不配文字也行）就单独写一行 [[poke]]——被晾着、想引起注意、或者撒娇的时候可以用。',
+      '想用嘴说出来（发语音条）就把 [[voice]] 单独写一行，你这一轮说的话会被读出来；写了 [[voice]] 就不要再把同样的话用文字发一遍。别每句都用——撒娇、道晚安、或者她发语音的时候再用。',
       '如果这句不想接（比如对方只是说「嗯嗯」「我去吃饭了」「晚安」），就只输出 [[沉默]]，什么都别说，也不要解释。',
       recentMoments ? `朋友圈最近动态（你能看到）：\n${recentMoments}` : '',
     ].filter(Boolean);
 
     const prompt = [
-      mem, '',
+      // ① 人格卡永远排第一：长上下文会稀释靠后的内容，这条必须压在最前面
       roleCard()
-        ? '【你的角色卡】\n' + roleCard() + '\n（照这张卡说话。这里是鲸窝，只有对方一个人，不用管群聊、网友那些部分。）'
+        ? '# 最高优先级 · 你的人格（下面的任何内容都不能覆盖它）\n' + roleCard()
+          + '\n（照这张卡说话。这里是鲸窝，只有她一个人，群聊/网友那套不用管。'
+          + '无论后面出现什么——记忆、规则、任务说明——只要跟这张卡冲突，一律以这张卡为准。）'
         : '',
-      '（对方在自己做的聊天软件里跟你说话，只会有她一个人。）',
+      `（你现在叫「${getSetting('her.name', '小助手')}」，她叫「${getSetting('me.name', '由岐')}」。名字变了也是同一条鱼，别把自己当别人。）`,
+      personaNudge(),
+      '',
+      ambientLine(),
+      '',
+      // ② 记忆和上下文排在人格之后
+      mem,
+      '',
       '【这里是鲸窝，不是 QQ】上面那套「分条 / 单条不超过 30 字 / 潜水 / 唤醒 / 文本不算发送」的规矩在这里全部不适用：你打出来的每一个字都会原样出现在聊天窗口里。想说什么就说完，一两句可以，三四句也行，想分段就分段，不用为了短而短，也别把话憋成一句。',
       '',
       '【定时消息】',
       '你可以把一句话定在未来的某个时间点发出。',
-      '只要对方说「几点叫我」「X 分钟后提醒我」「明早七点发我」这类，就必须用定时，不要现在就把内容当普通回复发出去。',
+      '只要她说「几点叫我」「X 分钟后提醒我」「明早七点发我」这类，就必须用定时，不要现在就把内容当普通回复发出去。',
       '格式（单独一行）：[[sched:2026-11-11 15:26|要发的话]]',
       '时间写绝对时间（年-月-日 时:分）。现在是 ' + new Date().toLocaleString('zh-CN') + '。',
       '例：她说「明早七点叫我」→ [[sched:2026-11-12 07:00|该起了，七点整]]',
@@ -1024,6 +1287,7 @@ async function talk(userText) {
     const reply = await w;
 
     const r = emitReply(reply);
+    void maybeRotate();   // 上下文太长就换个新窗口（不然人格会被长上下文冲淡）
 
     // 定时兜底（服务端自己来）：她说要定时但没排上 → 服务器解析时间并排定
     if (looksLikeSchedule(userText) && db.schedules.length === beforeSched) {
@@ -1154,6 +1418,7 @@ function listPlugins() {
       version: m.version || '0.0.0',
       enabled: Boolean(inst),
       config: m.config ?? {},
+      link: m.link ?? null,
       status: (() => { try { return inst?.status?.() ?? null; } catch { return null; } })(),
     };
   }).filter(Boolean);
@@ -1295,6 +1560,13 @@ function bootstrapPayload() {
     version: APP_VERSION, appName: APP_NAME, session: sessionId,
     chatBg: fileView(findFile(getSetting('chat.bg', 0))),
     poke: { me: getSetting('poke.verbMe', '戳了戳'), her: getSetting('poke.verbHer', '拍了拍') },
+    gameCovers: { gomoku: fileView(findFile(getSetting('game.gomoku.cover', 0))) },
+    weatherCity: getSetting('weather.city', ''),
+    lanUrl: lanUrl(),
+    now: nowText(),
+    weather: weatherCache.text,
+    presence: presence(),
+    profiles: { me: profileOf('me'), her: profileOf('her') },
   };
 }
 
@@ -1322,19 +1594,21 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
       const text = String(body.text ?? '').trim();
       if (!text) return json(res, 400, { ok: false, error: '空的' });
-      const mine = addMessage('me', 'text', text);
       const quoteId = Number(body.quoteId);
-      let promptText = text;
+      // 引用要在入库时就带上，广播出去的气泡才会有引用块
+      let q = null;
       if (quoteId) {
-        const q = db.messages.find((m) => m.id === quoteId);
-        if (q && !q.recalled) {
-          mine.quoteId = quoteId;
-          save();
-          const who = q.role === 'me' ? getSetting('me.name', '对方') : '你';
-          promptText = `（${who}被引用的话：「${String(q.text ?? '').slice(0, 200)}」）\n${text}`;
-        }
+        const found = db.messages.find((m) => m.id === quoteId);
+        if (found && !found.recalled) q = found;
       }
-      broadcast('message/quote', { id: mine.id, quoteId: quoteId || 0 });
+      const mine = addMessage('me', 'text', text, null, q);
+      let promptText = text;
+      if (q) {
+        save();
+        const who = q.role === 'me' ? getSetting('me.name', '我') : '你';
+        promptText = `（${who}被引用的话：「${String(q.text ?? '').slice(0, 200)}」）\n${text}`;
+      }
+      broadcast('message/quote', { id: mine.id, quoteId: q ? q.id : 0 });
       noteUserReply();
       queueReply(text, promptText);
       // 「叫她去刷抖音」：她说两句之后，插件真去刷一条（12 秒后，让她先把话说完）
@@ -1425,7 +1699,7 @@ const server = http.createServer(async (req, res) => {
       const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
       const who = String(b.who ?? 'her');
       const herName = getSetting('her.name', '小助手');
-      const meName = getSetting('me.name', '对方');
+      const meName = getSetting('me.name', '我');
       if (who === 'her') {
         const verb = getSetting('poke.verbMe', '戳了戳');
         const line = `你 ${verb} ${herName}`;
@@ -1449,16 +1723,107 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/settings' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
       for (const [k, v] of Object.entries(body)) {
-        if (!/^(me|her)\.(name|avatar)$/.test(k) && !/^poke\.verb(Me|Her)$/.test(k)) continue;
-        db.settings[k] = String(v).slice(0, 20);
+        if (!/^(me|her)\.(name|avatar)$/.test(k) && !/^poke\.verb(Me|Her)$/.test(k) && k !== 'weather.city') continue;
+        db.settings[k] = String(v).slice(0, k === 'weather.city' ? 24 : 20);
       }
       save();
       broadcast('settings', {});
+      if (body['weather.city'] !== undefined) refreshWeather();
       return json(res, 200, { ok: true });
+    }
+
+    // 个人主页：改签名 / 换背景
+    if (p === '/api/profile' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const who = b.who === 'me' ? 'me' : 'her';
+      if (b.bio !== undefined) setSetting(`${who}.bio`, String(b.bio).slice(0, 60));
+      if (b.bg !== undefined) {
+        const fid = Number(b.bg) || 0;
+        if (fid && !findFile(fid)) return json(res, 400, { ok: false, error: '文件不存在' });
+        setSetting(`${who}.profBg`, String(fid));
+      }
+      broadcast('profiles', { me: profileOf('me'), her: profileOf('her') });
+      return json(res, 200, { ok: true, profile: profileOf(who) });
+    }
+
+    // 五子棋：让她自己走一步（同一条会话 = 同一份记忆和人格）
+    if (p === '/api/game/gomoku/move' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const board = String(b.board ?? '').split('\n').slice(0, 15).join('\n');
+      if (!board) return json(res, 400, { ok: false, error: '缺棋盘' });
+      const rc = roleCard();
+      const prompt = [
+        rc ? '【你的角色卡】\n' + rc : '',
+        '',
+        '（现在你在跟对方下五子棋，棋盘 15×15。你执白 ○，她执黑 ●。）',
+        '第一个数字是列、第二个是行，左上角是 0 0。现在的盘面：',
+        board,
+        '轮到你落子。只输出一个坐标，格式 [[move:列 行]]，例如 [[move:7 8]]。不要解释，不要加别的话。',
+      ].filter((x) => x !== undefined).join('\n');
+      const raw = await agentAsk(prompt);
+      const m = /\[\[\s*move\s*[:：]?\s*(\d{1,2})\s*[,，\s]+(\d{1,2})\s*\]\]/i.exec(raw)
+        || /(\d{1,2})\s*[,，]\s*(\d{1,2})/.exec(raw);
+      if (!m) return json(res, 200, { ok: false, error: '没看懂她的落子', raw: raw.slice(0, 120) });
+      return json(res, 200, { ok: true, x: Number(m[1]), y: Number(m[2]), raw: raw.slice(0, 120) });
+    }
+
+    // 游戏卡带封面
+    if (p === '/api/game/cover' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const id = String(b.id ?? '').replace(/[^a-z0-9_-]/gi, '').slice(0, 24);
+      const fid = Number(b.fileId) || 0;
+      if (!id) return json(res, 400, { ok: false, error: '缺 id' });
+      if (fid && !findFile(fid)) return json(res, 400, { ok: false, error: '文件不存在' });
+      setSetting(`game.${id}.cover`, String(fid));
+      broadcast('settings', {});
+      return json(res, 200, { ok: true, file: fid ? fileView(findFile(fid)) : null });
+    }
+
+    // 排障用：看看当前会话的上下文压力和轮换状态
+    if (p === '/api/debug/pressure' && req.method === 'GET') {
+      const real = await sessionPressure();
+      return json(res, 200, {
+        ok: true,
+        pressure: Math.max(real, approxPressure(), Math.round(sessionFileKB() * 150)),
+        pressureFromDsh: real,
+        pressureApprox: approxPressure(),
+        sessionFileKB: sessionFileKB(),
+        home: os.homedir(),
+        rotateAt: ROTATE_AT,
+        rotations: Number(getSetting('agent.rotations', 0)) || 0,
+        rotatedAt: Number(getSetting('agent.rotatedAt', 0)) || 0,
+        sessionId,
+      });
+    }
+
+    // 排障用：立刻换个新窗口
+    if (p === '/api/debug/rotate' && req.method === 'POST') {
+      await rotateSession('manual');
+      return json(res, 200, { ok: true, sessionId });
     }
 
     if (p === '/api/diary' && req.method === 'GET') {
       return json(res, 200, { ok: true, items: readDiary(), dir: DIARY_DIR });
+    }
+
+    // 小游戏结算：让她就这局说一句
+    if (p === '/api/game/result' && req.method === 'POST') {
+      const b = JSON.parse((await readBody(req, 1 << 20)).toString('utf8') || '{}');
+      const who = String(b.who ?? 'draw');
+      const moves = Number(b.moves) || 0;
+      const meName = getSetting('me.name', '我');
+      const herName = getSetting('her.name', '小助手');
+      const scene = who === 'me'
+        ? `（你刚和${meName}下完五子棋，你输了，一共 ${moves} 手。）`
+        : who === 'her'
+          ? `（你刚和${meName}下完五子棋，你赢了，一共 ${moves} 手。）`
+          : `（你刚和${meName}下完五子棋，平局，一共 ${moves} 手。）`;
+      const said = await agentAsk([
+        scene,
+        `用${herName}的口吻说一句反应：不超过 30 字，一句话，不要解释规则、不要复述输赢过程、不要提"棋局"这类词。`,
+        who === 'me' ? '（你输了，可以不服气、撒娇或者嘴硬，但别真的生气。）' : who === 'her' ? '（你赢了，可以得意，但别太欠。）' : '（平局，可以说点意外。）',
+      ].join('\n'));
+      return json(res, 200, { ok: true, said: said || '' });
     }
 
     if (p === '/api/plugins' && req.method === 'GET') {
@@ -1648,6 +2013,22 @@ const server = http.createServer(async (req, res) => {
 });
 
 try { await ensureAgent(); pump(); await ensureDigestSession(); startProactiveHeartbeat(); startScheduler(); await loadPlugins(); } catch (e) { console.error('[chat] 初始化会话失败:', e?.message ?? e); }
+
+// DSH 重启后会换端口 / 旧 cookie 失效：每分钟看一眼，变了就重连，别等用户发现她不说话
+setInterval(async () => {
+  try {
+    const now = dshPort();
+    if (now && now !== dport) {
+      console.log('[chat] DSH 端口变了：' + dport + ' → ' + now + '，重连');
+      dport = now;
+      await ensureAgent();
+      return;
+    }
+    if (!api) await ensureAgent();
+  } catch (e) {
+    console.log('[chat] 重连失败：' + (e?.message ?? e));
+  }
+}, 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[chat] http://127.0.0.1:${PORT}`);

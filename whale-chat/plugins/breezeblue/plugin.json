@@ -1,0 +1,14 @@
+{
+  "id": "breezeblue",
+  "name": "语音 · BreezeBlue",
+  "version": "1.0.0",
+  "description": "她的声音。用 BreezeBlue 合成语音（音色「鲸汐」），控制台管音色和余额。",
+  "defaultEnabled": true,
+  "link": {
+    "label": "打开控制台",
+    "url": "https://breezeblue.ai/zh/app/studio"
+  },
+  "config": {
+    "voiceId": "voc_q5s9nu2j4weg"
+  }
+}

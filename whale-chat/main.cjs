@@ -29,11 +29,14 @@ async function ensureServer() {
   // 用自带 Node 24 跑服务：Electron 的 Node 20 没有原生 WebSocket，接不上 DSH 事件流
   const bundled = path.join(process.resourcesPath, 'runtime', 'node.exe');
   const nodeExe = fs.existsSync(bundled) ? bundled : process.execPath;
+  // 数据目录：优先用已有的那份（同一个人装新包不丢聊天记录），否则用用户目录
+  // 数据目录：环境变量优先，否则放用户目录（想复用旧数据就设 CHAT_DATA）
+  const dataDir = process.env.CHAT_DATA || path.join(app.getPath('userData'), 'data');
   serverProc = spawn(nodeExe, [script], {
     cwd: __dirname,
     windowsHide: true,
     stdio: 'ignore',
-    env: { ...process.env, CHAT_PORT: String(PORT), CHAT_DATA: process.env.CHAT_DATA || path.join(app.getPath('userData'), 'data') },
+    env: { ...process.env, CHAT_PORT: String(PORT), CHAT_DATA: dataDir },
   });
   for (let i = 0; i < 40; i += 1) {
     await new Promise((r) => setTimeout(r, 500));
@@ -96,6 +99,47 @@ ipcMain.handle('win-state', () => ({
   visible: win ? win.isVisible() : false,
 }));
 
+// ── 自动更新（只有打包版才带 electron-updater）────────────────────────────
+let updater = null;
+try { updater = require('electron-updater').autoUpdater; } catch { updater = null; }
+
+function setupUpdater() {
+  if (!updater || !app.isPackaged) return;
+  updater.autoDownload = true;
+  updater.autoInstallOnAppQuit = true;
+  updater.on('update-available', (info) => {
+    showNotification({ title: '鲸窝有新版本', body: `正在后台下载 ${info.version}…` });
+  });
+  updater.on('update-downloaded', async (info) => {
+    const r = await dialog.showMessageBox({
+      type: 'info', buttons: ['马上重启', '稍后'], defaultId: 0, cancelId: 1,
+      title: '更新已就绪', message: `新版本 ${info.version} 已下载好，重启后生效。`,
+    });
+    if (r.response === 0) { app.isQuitting = true; updater.quitAndInstall(); }
+  });
+  updater.on('error', (e) => {
+    try {
+      fs.appendFileSync(path.join(app.getPath('userData'), 'updater.log'),
+        new Date().toISOString() + ' ' + (e?.message ?? e) + '\n');
+    } catch {}
+  });
+  setTimeout(() => { updater.checkForUpdates().catch(() => {}); }, 10000);
+}
+
+async function checkUpdatesManually() {
+  if (!updater || !app.isPackaged) {
+    dialog.showMessageBox({ message: '带自动更新的版本才支持检查更新。' });
+    return;
+  }
+  try {
+    const r = await updater.checkForUpdates();
+    if (!r?.updateInfo) return;
+    dialog.showMessageBox({ message: '当前已是最新版本 ' + app.getVersion() });
+  } catch (e) {
+    dialog.showMessageBox({ message: '检查更新失败：' + (e?.message ?? e) });
+  }
+}
+
 let tray = null;
 
 /** 托盘：关掉窗口后还在这儿，点一下回来。 */
@@ -107,6 +151,7 @@ function createTray() {
     tray.setToolTip('鲸窝');
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: '打开鲸窝', click: () => { if (win) { win.show(); win.focus(); } } },
+      { label: '检查更新', click: () => { checkUpdatesManually(); } },
       { type: 'separator' },
       { label: '退出', click: () => { app.isQuitting = true; app.quit(); } },
     ]));
@@ -147,6 +192,7 @@ app.whenReady().then(async () => {
   }
   createWindow();
   createTray();
+  setupUpdater();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
